@@ -451,9 +451,10 @@ class MainActivity : FlutterActivity() {
                     "broadcast" to ""
                 )
             }
-            val gateway = lp.routes
-                .firstOrNull { it.isDefaultRoute && it.gateway != null }
-                ?.gateway?.hostAddress ?: ""
+            val defaultRoutes = lp.routes.filter { it.isDefaultRoute && it.gateway != null }
+            val gateway4 = defaultRoutes.firstOrNull { it.gateway is Inet4Address }?.gateway?.hostAddress ?: ""
+            val gateway6 = defaultRoutes.firstOrNull { it.gateway is Inet6Address }?.gateway?.hostAddress ?: ""
+            val gateway = gateway4.ifEmpty { gateway6 }
             networks.add(
                 mapOf(
                     "id" to network.toString(),
@@ -462,6 +463,7 @@ class MainActivity : FlutterActivity() {
                     "addresses" to addresses,
                     "dns" to lp.dnsServers.mapNotNull { it.hostAddress },
                     "gateway" to gateway,
+                    "gateway6" to gateway6,
                     "mtu" to lp.mtu,
                     "validated" to caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
                     "internet" to caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET),

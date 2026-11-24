@@ -175,7 +175,7 @@ class _SpeedPageState extends State<SpeedPage> {
                             ? '正在停止并汇总结果…'
                             : running
                                 ? '稳定 ${store.displaySpeed(_avgWindow)} ${store.displayUnit} · 峰值 ${store.displaySpeed(_peak)}'
-                                : (_mode == 'download' ? '默认：Cloudflare / Hetzner / OVH 三 CDN' : '上传：Cloudflare __up'),
+                                : (_mode == 'download' ? '默认 3 个 CDN · 多 DNS' : '上传 Cloudflare'),
                         running: running && !stopping,
                         onTap: stopping ? null : (running ? () { task?.stop(); setState(() {}); } : _start),
                         size: 248,

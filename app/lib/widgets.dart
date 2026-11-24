@@ -416,7 +416,20 @@ class _PmGaugeState extends State<PmGauge> with SingleTickerProviderStateMixin {
                 ),
               ),
               const SizedBox(height: 8),
-              Text(widget.caption, style: context.text.bodySmall?.copyWith(color: pm.muted)),
+              SizedBox(
+                width: widget.size * 0.56,
+                child: Text(
+                  widget.caption,
+                  textAlign: TextAlign.center,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.text.bodySmall?.copyWith(
+                    color: pm.muted,
+                    fontSize: 11,
+                    height: 1.3,
+                  ),
+                ),
+              ),
             ],
           ),
         ],

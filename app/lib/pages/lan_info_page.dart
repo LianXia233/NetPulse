@@ -73,6 +73,63 @@ class _LanInfoPageState extends State<LanInfoPage> {
     return ' · 6 GHz';
   }
 
+  List<int>? _ipv6Bytes(String raw) {
+    final s = raw.split('%').first;
+    final halves = s.split('::');
+    if (halves.length > 2) return null;
+    List<int> parse(String part) {
+      if (part.isEmpty) return [];
+      final out = <int>[];
+      for (final h in part.split(':')) {
+        final v = int.tryParse(h, radix: 16);
+        if (v == null || v < 0 || v > 0xffff) return const [];
+        out
+          ..add(v >> 8)
+          ..add(v & 0xff);
+      }
+      return out;
+    }
+
+    final head = parse(halves[0]);
+    final tail = halves.length == 2 ? parse(halves[1]) : const <int>[];
+    final missing = 16 - head.length - tail.length;
+    if (missing < 0 || (halves.length == 1 && missing != 0)) return null;
+    return [...head, ...List.filled(missing, 0), ...tail];
+  }
+
+  /// fe80::/64 的 EUI-64 链路本地地址里包含 MAC；Android 10+ 隐藏 MAC 时可用它推导。
+  String? _macFromIpv6(String ip) {
+    final b = _ipv6Bytes(ip);
+    if (b == null || b.length != 16) return null;
+    if (b[11] != 0xff || b[12] != 0xfe) return null;
+    final mac = [b[8] ^ 0x02, b[9], b[10], b[13], b[14], b[15]];
+    return mac
+        .map((e) => e.toRadixString(16).padLeft(2, '0').toUpperCase())
+        .join(':');
+  }
+
+  String? _interfaceLinkLocal(Map<String, dynamic> iface) {
+    final addresses = iface['addresses'];
+    if (addresses is! List) return null;
+    for (final a in addresses) {
+      if (a is Map) {
+        final ip = a['ip']?.toString() ?? '';
+        if (ip.toLowerCase().startsWith('fe80')) return ip;
+      }
+    }
+    return null;
+  }
+
+  String? _activeDerivedMac() {
+    for (final it in NativeInfo.lanInterfaces) {
+      if ((it['name']?.toString() ?? '') == NativeInfo.interfaceName) {
+        final ll = _interfaceLinkLocal(it);
+        if (ll != null) return _macFromIpv6(ll);
+      }
+    }
+    return null;
+  }
+
   IconData _transportIcon(String transport) {
     return switch (transport) {
       'Wi-Fi' => Icons.wifi_rounded,
@@ -122,7 +179,10 @@ class _LanInfoPageState extends State<LanInfoPage> {
     final pm = context.pm;
     final scheme = context.scheme;
     final active = NativeInfo.lanActive;
-    final networks = [...NativeInfo.lanNetworks]..sort((a, b) {
+    final allNetworks = NativeInfo.lanNetworks;
+    final internetNetworks = allNetworks.where((e) => e['internet'] == true).toList();
+    final networks = [...(internetNetworks.isEmpty ? allNetworks : internetNetworks)]
+      ..sort((a, b) {
         int rank(Map<String, dynamic> net) {
           if ((net['interface']?.toString() ?? '') == NativeInfo.interfaceName) return 0;
           return net['validated'] == true ? 1 : 2;
@@ -182,8 +242,11 @@ class _LanInfoPageState extends State<LanInfoPage> {
                       'MAC 地址',
                       NativeInfo.macAddress.isNotEmpty
                           ? NativeInfo.macAddress
-                          : (NativeInfo.macHidden ? '系统已隐藏（Android 10+）' : '系统未提供'),
+                          : (_activeDerivedMac() != null
+                              ? '${_activeDerivedMac()}（IPv6 推导）'
+                              : (NativeInfo.macHidden ? '系统已隐藏（Android 10+）' : '系统未提供')),
                       mono: true,
+                      onCopy: _activeDerivedMac() == null ? null : _copy,
                     ),
                     _kvRow(context, 'MTU', NativeInfo.mtu > 0 ? '${NativeInfo.mtu} bytes' : '—'),
                     _kvRow(
@@ -269,7 +332,7 @@ class _LanInfoPageState extends State<LanInfoPage> {
                     Expanded(
                       child: Text(
                         '数据来自 Android ConnectivityManager / NetworkInterface 与 Wi-Fi 链路信息；'
-                        'Android 10+ 对普通应用隐藏 Wi-Fi MAC，部分 ROM 只提供带宽估算值。'
+                        'Android 10+ 对普通应用隐藏 Wi-Fi MAC；若存在 EUI-64 链路本地 IPv6，会用其推导 MAC。部分 ROM 只提供带宽估算值。'
                         '仅显示本机接口，不发起外部扫描或探测。',
                         style: context.text.bodySmall?.copyWith(color: pm.muted, height: 1.45),
                       ),
@@ -429,6 +492,9 @@ class _LanInfoPageState extends State<LanInfoPage> {
             ),
           if ((net['gateway']?.toString() ?? '').isNotEmpty)
             _miniRow(context, '网关', net['gateway'].toString(), onCopy: _copy),
+          if ((net['gateway6']?.toString() ?? '').isNotEmpty &&
+              net['gateway6']?.toString() != net['gateway']?.toString())
+            _miniRow(context, 'IPv6 网关', net['gateway6'].toString(), onCopy: _copy),
           if (dns.isNotEmpty) _miniRow(context, 'DNS', dns.join(' · ')),
           if ((net['privateDns']?.toString() ?? '').isNotEmpty)
             _miniRow(context, '私有 DNS', net['privateDns'].toString()),
@@ -476,6 +542,11 @@ class _LanInfoPageState extends State<LanInfoPage> {
               if ((net['mac']?.toString() ?? '').isNotEmpty)
                 Text(
                   'MAC ${net['mac']}',
+                  style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
+                )
+              else if (_macFromIpv6(_interfaceLinkLocal(net) ?? '') != null)
+                Text(
+                  'MAC ${_macFromIpv6(_interfaceLinkLocal(net) ?? '')}（IPv6 推导）',
                   style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
                 )
               else if (net['macHidden'] == true)
