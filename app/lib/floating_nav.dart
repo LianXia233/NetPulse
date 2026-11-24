@@ -35,7 +35,7 @@ class _FloatingNavDockState extends State<FloatingNavDock>
     with SingleTickerProviderStateMixin {
   static const double _height = 62;
   static const double _padding = 4;
-  static const double _iconSize = 27;
+  static const double _iconSize = 28;
 
   late final AnimationController _travel = AnimationController(
     vsync: this,
@@ -149,7 +149,7 @@ class _FloatingNavDockState extends State<FloatingNavDock>
     final dark = context.isDark;
     final lensColor = dark
         ? Color.alphaBlend(Colors.white.withValues(alpha: 0.08), pm.card)
-        : Color.alphaBlend(scheme.onSurface.withValues(alpha: 0.055), pm.card);
+        : Color.alphaBlend(scheme.onSurface.withValues(alpha: 0.08), pm.card);
     return AnimatedScale(
       scale: _pressed ? 0.985 : 1,
       duration: const Duration(milliseconds: 140),
@@ -158,9 +158,7 @@ class _FloatingNavDockState extends State<FloatingNavDock>
         height: _height,
         decoration: ShapeDecoration(
           color: pm.card.withValues(alpha: dark ? 0.94 : 0.98),
-          shape: StadiumBorder(
-            side: BorderSide(color: pm.inset.withValues(alpha: 0.55)),
-          ),
+          shape: const StadiumBorder(),
           shadows: [
             BoxShadow(
               color: Colors.black.withValues(alpha: dark ? 0.42 : 0.10),
@@ -261,8 +259,8 @@ class _DockItem extends StatelessWidget {
     final color = selected
         ? scheme.primary
         : (context.isDark
-            ? pm.muted.withValues(alpha: 0.92)
-            : scheme.onSurface.withValues(alpha: 0.66));
+            ? pm.muted.withValues(alpha: 0.95)
+            : scheme.onSurfaceVariant.withValues(alpha: 0.9));
     return Semantics(
       button: true,
       selected: selected,

@@ -45,7 +45,7 @@ class HistoryRecord {
 }
 
 const String kDefaultDownloadDir = '/storage/emulated/0/Download/NetPulse';
-const String kAppVersion = '1.1.1';
+const String kAppVersion = '1.1.2';
 
 class AppStore extends ChangeNotifier {
   ThemeMode themeMode = ThemeMode.system;
