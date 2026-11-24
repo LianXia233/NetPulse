@@ -506,7 +506,7 @@ fn build_cdn_pool(
     dns_mode: &str,
 ) -> Vec<CdnEntry> {
     let mut out: Vec<CdnEntry> = Vec::new();
-    let mut servers = servers.to_vec();
+    let mut servers = dns::dedupe_servers(servers);
     if dns_mode == "primary" && servers.len() > 1 {
         servers.truncate(1);
     }

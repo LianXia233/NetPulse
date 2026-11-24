@@ -181,7 +181,7 @@ pub struct ResolveCache {
 impl ResolveCache {
     pub fn new(servers: Vec<String>, timeout: Duration) -> Self {
         Self {
-            servers,
+            servers: dns::dedupe_servers(&servers),
             timeout,
             dns_mode: "all".into(),
             ip_mode: "auto".into(),

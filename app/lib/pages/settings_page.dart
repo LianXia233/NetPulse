@@ -1137,13 +1137,7 @@ const kDnsPreset = [
 ];
 
 List<String> _parseDnsList(String text) {
-  final seen = <String>{};
-  return text
-      .split(RegExp(r'[,，\n\r]+'))
-      .map((e) => e.trim())
-      .where((e) => e.isNotEmpty && !e.startsWith('#'))
-      .where(seen.add)
-      .toList();
+  return normalizeDnsList(text.split(RegExp(r'[,，\n\r]+')));
 }
 
 

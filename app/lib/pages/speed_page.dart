@@ -175,7 +175,9 @@ class _SpeedPageState extends State<SpeedPage> {
                             ? '正在停止并汇总结果…'
                             : running
                                 ? '稳定 ${store.displaySpeed(_avgWindow)} ${store.displayUnit} · 峰值 ${store.displaySpeed(_peak)}'
-                                : (_mode == 'download' ? '默认 3 个 CDN · 多 DNS' : '上传 Cloudflare'),
+                                : (_mode == 'download'
+                                    ? '${store.speedEndpoints.length} 个 CDN · ${store.dnsServers.length} 个 DNS'
+                                    : '${store.uploadEndpoints.length} 个上传源'),
                         running: running && !stopping,
                         onTap: stopping ? null : (running ? () { task?.stop(); setState(() {}); } : _start),
                         size: 248,
@@ -394,6 +396,17 @@ class _SpeedPageState extends State<SpeedPage> {
               divisions: 31,
               display: (v) => v.toStringAsFixed(0),
               onChanged: (v) => setSheet(() => workers = v.round()),
+            ),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                '线程会按已配置的 CDN 数量轮询分配：配置几个 CDN 就用几个，不再固定默认 3 个。',
+                style: context.text.bodySmall?.copyWith(
+                  color: context.pm.muted,
+                  fontSize: 11,
+                  height: 1.4,
+                ),
+              ),
             ),
             PmSliderRow(
               label: '测试时长',

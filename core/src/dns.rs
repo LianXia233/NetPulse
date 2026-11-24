@@ -1,6 +1,7 @@
 //! 极简 DNS 客户端（UDP + TCP 回退），支持自定义服务器、多服务器竞速、A/AAAA 查询。
 //! 不依赖系统 resolver，便于「多 DNS 解析」对照测速。
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::sync::mpsc;
 use std::thread;
@@ -23,6 +24,42 @@ fn encode_name(name: &str, out: &mut Vec<u8>) {
         out.extend_from_slice(bytes);
     }
     out.push(0);
+}
+
+/// 去掉空白、空项和重复 DNS；DoH/DoT 按大小写不敏感去重，保留首次出现的写法。
+fn server_key(value: &str) -> String {
+    let mut key = value.trim().to_ascii_lowercase();
+    if let Some(rest) = key.strip_prefix("tls://") {
+        key = format!("dot://{}", rest);
+    }
+    if key.starts_with("dot://") {
+        key = key.trim_end_matches('/').to_string();
+        if let Some(rest) = key.strip_prefix("dot://") {
+            if let Some(host) = rest.strip_suffix(":853") {
+                key = format!("dot://{}", host);
+            }
+        }
+    } else if key.starts_with("https://") {
+        key = key.trim_end_matches('/').to_string();
+    } else if let Some(host) = key.strip_suffix(":53") {
+        key = host.to_string();
+    }
+    key
+}
+
+pub fn dedupe_servers(servers: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(servers.len());
+    for server in servers {
+        let value = server.trim();
+        if value.is_empty() || value.starts_with('#') {
+            continue;
+        }
+        if seen.insert(server_key(value)) {
+            out.push(value.to_string());
+        }
+    }
+    out
 }
 
 pub fn parse_server(server: &str) -> Result<(IpAddr, u16), String> {
@@ -359,6 +396,7 @@ pub fn query(host: &str, server: &str, qtype: u16, timeout: Duration) -> Result<
 /// 同时查询全部配置的 DNS（UDP/DoT/DoH 可混合），返回每台服务器的有效结果。
 /// 这是「设置里写几个 DNS 就用几个」的核心实现；慢服务器到总超时即放弃，不拖累快服务器。
 pub fn query_all(host: &str, servers: &[String], qtype: u16, timeout: Duration) -> Vec<Answer> {
+    let servers = dedupe_servers(servers);
     if let Ok(ip) = host.parse::<IpAddr>() {
         return vec![Answer {
             ips: vec![ip],
@@ -421,11 +459,12 @@ pub fn resolve_with_servers(
             truncated: false,
         });
     }
+    let servers = dedupe_servers(servers);
     if servers.is_empty() {
         return Err("未配置 DNS 服务器".into());
     }
     let _ = start_index;
-    let answers = query_all(host, servers, qtype, timeout);
+    let answers = query_all(host, &servers, qtype, timeout);
     if answers.is_empty() {
         return Err(format!("{} 台 DNS 均未返回结果", servers.len()));
     }
@@ -455,4 +494,32 @@ pub fn resolve_with_servers(
         rcode,
         truncated: false,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dedupe_normalizes_aliases() {
+        let servers = vec![
+            " 8.8.8.8 ".to_string(),
+            "8.8.8.8:53".to_string(),
+            "tls://dns.google".to_string(),
+            "dot://dns.google:853".to_string(),
+            "https://dns.google/dns-query/".to_string(),
+            "https://dns.google/dns-query".to_string(),
+            "# comment".to_string(),
+            String::new(),
+        ];
+        let out = dedupe_servers(&servers);
+        assert_eq!(
+            out,
+            vec![
+                "8.8.8.8",
+                "tls://dns.google",
+                "https://dns.google/dns-query/",
+            ]
+        );
+    }
 }

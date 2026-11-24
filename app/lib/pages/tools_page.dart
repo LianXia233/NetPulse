@@ -402,7 +402,7 @@ class _DnsPanelState extends State<DnsPanel> {
     _rows.clear();
     final task = CoreTask.start('dns', {
       'host': host,
-      'servers': AppScope.of(context).dnsServers,
+      'servers': normalizeDnsList(AppScope.of(context).dnsServers),
       'timeout_ms': 3000,
       'qtype': 'BOTH',
     });

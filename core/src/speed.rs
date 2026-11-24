@@ -6,10 +6,12 @@
 //! - Range 随机起点绕过 CDN 缓存，读到的每个字节都计入全局原子计数；
 //! - 采样线程按 sample_ms 输出瞬时 Mbps，结束后给出稳态均值/峰值。
 
+use crate::dns;
 use crate::http::{parse_bind, parse_url, send, Req, ResolveCache};
 use crate::{new_task, spawn_task, Task};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::Read;
 use std::net::IpAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -84,8 +86,16 @@ struct SpeedRoute {
 }
 
 /// 每个测速端点用「设置里的全部 DNS」并发解析，A/AAAA 都取；
-/// 一个 CDN 域名解析出多个 IP 时，每个 Worker 能绑定不同 IP。
-fn build_routes(endpoints: &[String], servers: &[String], timeout: Duration, ip_mode: &str, dns_mode: &str) -> Vec<SpeedRoute> {
+/// 返回值按端点分组：worker 先均匀分配到各 CDN，再在组内轮换 IP。
+/// 这样配置了几个 CDN 就用几个，不会被解析出更多 IP 的前几个端点“吃掉”所有线程。
+fn build_routes(
+    endpoints: &[String],
+    servers: &[String],
+    timeout: Duration,
+    ip_mode: &str,
+    dns_mode: &str,
+) -> Vec<Vec<SpeedRoute>> {
+    let servers = dns::dedupe_servers(servers);
     let mut handles = Vec::new();
     for endpoint in endpoints {
         let host = match parse_url(endpoint) {
@@ -99,7 +109,7 @@ fn build_routes(endpoints: &[String], servers: &[String], timeout: Duration, ip_
         };
         for qtype in qtypes {
             let endpoint = endpoint.clone();
-            let mut servers = servers.to_vec();
+            let mut servers = servers.clone();
             if dns_mode == "primary" && servers.len() > 1 {
                 servers.truncate(1);
             }
@@ -111,7 +121,7 @@ fn build_routes(endpoints: &[String], servers: &[String], timeout: Duration, ip_
             }));
         }
     }
-    let mut routes: Vec<SpeedRoute> = Vec::new();
+    let mut by_endpoint: HashMap<String, Vec<SpeedRoute>> = HashMap::new();
     for h in handles {
         if let Ok((endpoint, answers, ip_mode)) = h.join() {
             for a in answers {
@@ -120,8 +130,9 @@ fn build_routes(endpoints: &[String], servers: &[String], timeout: Duration, ip_
                         continue;
                     }
                     let ip = ip.to_string();
-                    if !routes.iter().any(|r| r.endpoint == endpoint && r.ip == ip) {
-                        routes.push(SpeedRoute {
+                    let list = by_endpoint.entry(endpoint.clone()).or_default();
+                    if !list.iter().any(|r| r.ip == ip) {
+                        list.push(SpeedRoute {
                             endpoint: endpoint.clone(),
                             ip,
                             dns: a.server.clone(),
@@ -131,16 +142,20 @@ fn build_routes(endpoints: &[String], servers: &[String], timeout: Duration, ip_
             }
         }
     }
-    if routes.is_empty() {
-        for endpoint in endpoints {
-            routes.push(SpeedRoute {
+    let mut groups = Vec::with_capacity(endpoints.len());
+    for endpoint in endpoints {
+        let mut group = by_endpoint.remove(endpoint).unwrap_or_default();
+        if group.is_empty() {
+            // DNS 全部失败时仍保留端点，交给 ResolveCache 的系统解析兜底。
+            group.push(SpeedRoute {
                 endpoint: endpoint.clone(),
                 ip: String::new(),
                 dns: "自动".into(),
             });
         }
+        groups.push(group);
     }
-    routes
+    groups
 }
 
 fn run(p: SpeedParams, task: Arc<Task>) {
@@ -286,7 +301,7 @@ fn transient_speed_error(e: &str) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn worker(
     idx: usize,
-    routes: Arc<Vec<SpeedRoute>>,
+    routes: Arc<Vec<Vec<SpeedRoute>>>,
     mode: String,
     buffer: usize,
     cache: Arc<ResolveCache>,
@@ -300,7 +315,12 @@ fn worker(
     bind_ip: Option<IpAddr>,
     bind_if: Arc<String>,
 ) {
-    let first = routes.first().map(|r| r.endpoint.clone()).unwrap_or_default();
+    let endpoint_count = routes.len().max(1);
+    let first = routes
+        .get(idx % endpoint_count)
+        .and_then(|g| g.first())
+        .map(|r| r.endpoint.clone())
+        .unwrap_or_default();
     task.emit(json!({"type": "worker", "idx": idx, "endpoint": first, "state": "start"}));
     let mut seed = (Instant::now().elapsed().as_nanos() as u64) ^ ((idx as u64) << 32) ^ 0x9E3779B97F4A7C15;
     let mut reported_route = false;
@@ -321,7 +341,10 @@ fn worker(
         && Instant::now() < deadline
         && (limit == 0 || bytes.load(Ordering::Relaxed) < limit)
     {
-        let route = routes[(idx + attempt) % routes.len()].clone();
+        let endpoint_index = (idx + attempt) % endpoint_count;
+        let group = &routes[endpoint_index];
+        let route_index = (idx / endpoint_count + attempt) % group.len().max(1);
+        let route = group[route_index].clone();
         let endpoint = route.endpoint.clone();
         attempt = attempt.wrapping_add(1);
         active.fetch_add(1, Ordering::Relaxed);

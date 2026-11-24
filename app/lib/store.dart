@@ -45,7 +45,32 @@ class HistoryRecord {
 }
 
 const String kDefaultDownloadDir = '/storage/emulated/0/Download/NetPulse';
-const String kAppVersion = '1.1.6';
+const String kAppVersion = '1.1.7';
+
+String _dnsKey(String value) {
+  var key = value.trim().toLowerCase();
+  if (key.startsWith('tls://')) key = 'dot://${key.substring(6)}';
+  if (key.startsWith('dot://')) {
+    key = key.replaceFirst(RegExp(r'/+$'), '');
+    if (key.endsWith(':853')) key = key.substring(0, key.length - 4);
+  } else if (key.startsWith('https://')) {
+    key = key.replaceFirst(RegExp(r'/+$'), '');
+  } else if (key.endsWith(':53')) {
+    key = key.substring(0, key.length - 3);
+  }
+  return key;
+}
+
+List<String> normalizeDnsList(Iterable<String> values) {
+  final seen = <String>{};
+  final out = <String>[];
+  for (final raw in values) {
+    final value = raw.trim();
+    if (value.isEmpty || value.startsWith('#')) continue;
+    if (seen.add(_dnsKey(value))) out.add(value);
+  }
+  return out;
+}
 
 class AppStore extends ChangeNotifier {
   ThemeMode themeMode = ThemeMode.system;
@@ -139,7 +164,7 @@ class AppStore extends ChangeNotifier {
           endpoints = (j['endpoints'] as List).map((e) => e.toString()).toList();
         }
         if (j['dnsServers'] is List) {
-          dnsServers = (j['dnsServers'] as List).map((e) => e.toString()).toList();
+          dnsServers = normalizeDnsList((j['dnsServers'] as List).map((e) => e.toString()));
         }
         uploadEndpoint = j['uploadEndpoint']?.toString() ?? uploadEndpoint;
         if (j['uploadEndpoints'] is List) {
@@ -155,7 +180,7 @@ class AppStore extends ChangeNotifier {
           downloadMirrors = (j['downloadMirrors'] as List).map((e) => e.toString()).toList();
         }
         if (j['downloadDns'] is List) {
-          downloadDns = (j['downloadDns'] as List).map((e) => e.toString()).toList();
+          downloadDns = normalizeDnsList((j['downloadDns'] as List).map((e) => e.toString()));
         }
         downloadUserAgent = j['downloadUserAgent']?.toString() ?? downloadUserAgent;
         downloadDir = j['downloadDir']?.toString() ?? downloadDir;
@@ -288,7 +313,7 @@ class AppStore extends ChangeNotifier {
   }
 
   void setDnsServers(List<String> value) {
-    dnsServers = value;
+    dnsServers = normalizeDnsList(value);
     save();
     notifyListeners();
   }
@@ -354,7 +379,7 @@ class AppStore extends ChangeNotifier {
   }
 
   void setDownloadDns(List<String> value) {
-    downloadDns = value;
+    downloadDns = normalizeDnsList(value);
     save();
     notifyListeners();
   }

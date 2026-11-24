@@ -43,9 +43,10 @@ pub fn start_dns(args: Value) -> Result<Value, String> {
     spawn_task(task, move |task| {
         let host = p.host.trim().to_string();
         let timeout = Duration::from_millis(p.timeout_ms.clamp(500, 20000));
-        task.emit(json!({"type": "start", "host": host, "servers": p.servers}));
+        let servers = dns::dedupe_servers(&p.servers);
+        task.emit(json!({"type": "start", "host": host, "servers": servers}));
         let mut all = Vec::new();
-        for server in &p.servers {
+        for server in &servers {
             for (label, qtype) in [("A", 1u16), ("AAAA", 28u16)] {
                 if p.qtype == "A" && qtype == 28 {
                     continue;
