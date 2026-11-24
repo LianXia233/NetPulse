@@ -85,7 +85,7 @@ pub fn detect_kind(path: &str, head: &[u8], size: u64) -> DbKind {
         let dbtype = head[0];
         let year = head[2];
         // IP2Proxy BIN：type 1..=12（PX1..PX12），release year >= 14（2014+）
-        if (1..=12).contains(&dbtype) && year >= 14 && year <= 60 {
+        if (1..=12).contains(&dbtype) && (14..=60).contains(&year) {
             return DbKind::Ip2Proxy;
         }
     }
@@ -146,9 +146,11 @@ fn split_csv(line: &str, delim: char) -> Vec<String> {
 /// - GeoLite2/DB-IP City num: start,end,country,state1,state2,city,postcode,lat,lon,tz
 /// - GeoLite2 Country num: start,end,country
 /// - IP2Location LITE DB1: start,end,country,country_long（带引号）
+type CsvCols = Option<(usize, usize, usize, usize, usize, usize, usize, usize)>;
+
 fn parse_csv_text(text: &str) -> Vec<Entry> {
     let mut entries: Vec<Entry> = Vec::new();
-    let mut cols: Option<(usize, usize, usize, usize, usize, usize, usize, usize)> = None;
+    let mut cols: CsvCols = None;
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -393,7 +395,7 @@ fn parse_qqwry(data: &[u8]) -> Vec<Entry> {
         && u32_first < data.len()
         && u32_last >= u32_first
         && u32_last + 7 <= data.len()
-        && (u32_last - u32_first) % 7 == 0;
+        && (u32_last - u32_first).is_multiple_of(7);
     let (first, last, new_fmt) = if new_header {
         (u32_first, u32_last, true)
     } else {
@@ -793,7 +795,7 @@ impl<'a> Mmdb<'a> {
         if ctype == 1 {
             // 指针：P = size 高 2 位（+1 得字节数），低 3 位是指针值高位
             let psize = (size >> 3) + 1;
-            let hi = (size & 7) as usize;
+            let hi = size & 7;
             if p + psize > self.data.len() {
                 return None;
             }

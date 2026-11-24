@@ -379,9 +379,7 @@ pub fn info(args: &Value) -> Result<Value, String> {
             }
         }
     }
-    let kind_label = match ipdb::detect_kind(path, &[], 0) {
-        _ => format,
-    };
+    let kind_label = format;
     Ok(json!({
         "builtin": !local,
         "path": path,
@@ -498,10 +496,10 @@ pub fn update(args: &Value) -> Result<Value, String> {
         fs::write(&tmp, &payload).map_err(|e| format!("写入失败: {e}"))?;
     } else {
         let mut out = String::with_capacity(entries.len() * 28);
+        let kind_text = format!("{kind:?}");
         out.push_str(&format!(
-            "#source\t{url}\n#updated\t{now}\n#count\t{}\n#format\t{}\n",
-            entries.len(),
-            format!("{kind:?}")
+            "#source\t{url}\n#updated\t{now}\n#count\t{}\n#format\t{kind_text}\n",
+            entries.len()
         ));
         for e in &entries {
             out.push_str(&format!(
@@ -738,8 +736,10 @@ fn normalize_api(ip: &str, d: &Value) -> Option<Value> {
         }
     }
     // ipapi.is：顶层 is_bogon / company 标志（免费响应无 asn 对象）
-    if d["is_bogon"].is_boolean() || d["company"].is_object() {
-        if s("is_bogon") != "true" && d["is_bogon"].as_bool() != Some(true) {
+    if (d["is_bogon"].is_boolean() || d["company"].is_object())
+        && s("is_bogon") != "true"
+        && d["is_bogon"].as_bool() != Some(true)
+    {
             let g = |k: &str| d[k].as_str().unwrap_or("").to_string();
             let asn = &d["asn"];
             let company = &d["company"];
@@ -786,10 +786,9 @@ fn normalize_api(ip: &str, d: &Value) -> Option<Value> {
                 "proxy_type": proxy_type,
                 "risk": d["risk_score"].as_i64().unwrap_or(-1),
             }));
-        }
     }
-    // IP.SB (ip.sb geoip)：asn 数字 + organization
-    if d["asn"].is_u64() && !s("country_code").is_empty() && d["asn"].is_object() == false {
+// IP.SB (ip.sb geoip)：asn 数字 + organization
+    if d["asn"].is_u64() && !s("country_code").is_empty() && !d["asn"].is_object() {
         let asn = d["asn"].as_u64().map(|v| format!("AS{v}")).unwrap_or_default();
         return Some(json!({
             "status": "success", "query": ip,
