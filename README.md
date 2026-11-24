@@ -12,10 +12,12 @@
 </p>
 
 <p align="center">
+  <a href="https://lianxia233.github.io/NetPulse/"><img src="https://img.shields.io/badge/GitHub%20Pages-Live%20Demo-007AFF.svg?style=flat-square&logo=googlechrome&logoColor=white" alt="GitHub Pages"></a>
   <a href="https://github.com/LianXia233/NetPulse/releases/latest"><img src="https://img.shields.io/github/v/release/LianXia233/NetPulse?style=flat-square&logo=github&color=34C759&label=Release" alt="Latest Release"></a>
   <a href="https://github.com/LianXia233/NetPulse/actions/workflows/android.yml"><img src="https://img.shields.io/github/actions/workflow/status/LianXia233/NetPulse/android.yml?branch=main&style=flat-square&logo=githubactions&logoColor=white&label=Build" alt="Build Status"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-007AFF?style=flat-square" alt="License: MIT"></a>
   <img src="https://img.shields.io/badge/Android-7.0%2B%20(API%2024%2B)-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android 7.0+">
+  <img src="https://img.shields.io/badge/Page%20Size-16KB%20Aligned-success.svg?style=flat-square" alt="16KB Aligned">
   <img src="https://img.shields.io/badge/Arch-arm64--v8a%20%7C%20armeabi--v7a-FF9500?style=flat-square" alt="Architecture">
   <img src="https://img.shields.io/badge/Flutter-3.50.1-02569B?style=flat-square&logo=flutter&logoColor=white" alt="Flutter 3.50.1">
   <img src="https://img.shields.io/badge/Rust-2021%20(stable)-DEA584?style=flat-square&logo=rust&logoColor=white" alt="Rust 2021">
