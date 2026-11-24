@@ -988,23 +988,179 @@
       color: var(--primary);
     }
 
-    /* Responsive */
+    /* ==========================================================================
+       Responsive Layout & Typography (mobile-first override layer)
+       ========================================================================== */
+
+    /* --- Fluid type: one scale, every viewport --- */
+    .hero-title       { font-size: min(6vw, calc((100vw - 56px) / 17.2), 4.2rem); line-height: 1.2; }
+    .section-heading  { font-size: clamp(1.3rem, 4.8vw, 2.8rem); line-height: 1.28; }
+    .section-subheading { font-size: clamp(.9rem, 3.4vw, 1.08rem); line-height: 1.72; }
+    .bento-card-title { font-size: clamp(1.05rem, 3.8vw, 1.35rem); line-height: 1.4; }
+    .bento-card-desc, .faq-answer, .spec-value, .footer p { line-height: 1.7; }
+
+    h1, h2, h3, h4, p, li, .metric-card, .diag-box { overflow-wrap: break-word; }
+    /* Keep each headline phrase whole so the line breaks on a separator, not inside a word */
+    .nb { white-space: nowrap; }
+    /* Optional line break: desktop keeps the slogan on one line */
+    .mob { display: none; }
+
+    /* Anchor jumps must clear the sticky header */
+    section[id] { scroll-margin-top: 86px; }
+
+    /* Inline fixed sizes in markup need neutralising on small screens */
+    #architecture h2 { font-size: clamp(1.25rem, 4.6vw, 2rem) !important; }
+
+    .nav-dl-label-short { display: none; }
+
+    /* --- Tablet --- */
+    @media (max-width: 1024px) {
+      .container { padding: 0 22px; }
+      .bento-grid { gap: 18px; }
+      .bento-card { padding: 26px; }
+      .hero { padding: 54px 0 32px; }
+      .section-wrap { padding: 56px 0; }
+      .showcase-section { padding: 30px 0 64px; }
+    }
+
+    /* --- Large phone / small tablet --- */
     @media (max-width: 960px) {
-      .bento-span-8, .bento-span-4, .bento-span-6 {
-        grid-column: span 12;
+      .bento-span-8, .bento-span-4, .bento-span-6 { grid-column: span 12; }
+      .nav-links { display: none; }
+      .nav { padding: 12px 18px; }
+      .nav.scrolled { padding: 9px 18px; }
+      .speed-metrics-grid { grid-template-columns: repeat(2, 1fr); }
+      .diag-item-grid { grid-template-columns: 1fr; }
+      .section-header-center { margin-bottom: 36px; }
+      .phone-chassis { padding: 12px; border-radius: 40px; }
+      .phone-screen { padding: 16px 18px 20px; border-radius: 30px; min-height: 0; }
+      .specs-card-wrap { padding: 28px 22px; }
+      .specs-grid { grid-template-columns: 1fr 1fr; gap: 18px; }
+    }
+
+    /* --- Phone (the primary reading target) --- */
+    @media (max-width: 620px) {
+      .container { padding: 0 16px; }
+
+      /* Compact header: icon-only repo button, short primary action */
+      .nav { padding: 10px 14px; }
+      .nav.scrolled { padding: 8px 14px; }
+      .nav-brand { font-size: 1.02rem; gap: 8px; min-width: 0; }
+      .nav-logo { width: 30px; height: 30px; border-radius: 8px; }
+      .nav-badge { display: none; }
+      .nav-actions { gap: 7px; flex-shrink: 0; }
+      .nav-actions .btn { padding: 9px 12px; font-size: .8rem; }
+      .nav-actions .btn-secondary { width: 38px; height: 38px; padding: 0; border-radius: 12px; }
+      .nav-actions .btn-secondary span { display: none; }
+      .nav-dl-label { display: none; }
+      .nav-dl-label-short { display: inline; }
+
+      /* Hero */
+      .hero { padding: 30px 0 26px; }
+      .hero-badge-pill { font-size: .72rem; padding: 5px 11px; line-height: 1.5; margin-bottom: 20px; animation: none; }
+      .hero-title { font-size: clamp(1.35rem, 6.4vw, 1.75rem); line-height: 1.32; margin-bottom: 16px; }
+      .mob { display: inline; }
+      .sep-m { display: none; }
+      .hero-desc { font-size: .9rem; line-height: 1.78; margin-bottom: 26px; }
+      .hero-cta { flex-direction: column; gap: 9px; margin-bottom: 26px; }
+      .hero-cta .btn { width: 100%; max-width: 330px; padding: 13px 16px !important; font-size: .9rem !important; }
+      .hero-chips { gap: 7px; }
+      .chip { font-size: .7rem; padding: 5px 10px; }
+      .hero-svg-canvas { margin-top: 24px; padding: 12px 14px 4px; border-radius: 16px; }
+      .hero-svg-header { flex-direction: column; align-items: flex-start; gap: 2px; font-size: .66rem; letter-spacing: 0; text-transform: none; }
+      .hero-svg-canvas svg { height: 64px; }
+      .hero-svg-canvas svg text { display: none; }
+
+      /* Phone simulator */
+      .showcase-section { padding: 26px 0 48px; }
+      .section-header-center { margin-bottom: 26px; }
+      .phone-chassis { padding: 8px; border-radius: 30px; }
+      .phone-screen { padding: 13px 12px 14px; border-radius: 23px; }
+      .screen-status-bar { font-size: .7rem; margin-bottom: 10px; }
+      .dynamic-island { width: 72px; height: 19px; gap: 6px; }
+      .island-camera { width: 8px; height: 8px; }
+      .island-sensor { width: 5px; height: 5px; }
+      .screen-app-header { margin-bottom: 12px; }
+      .screen-app-title { font-size: 1.02rem; gap: 7px; }
+      .screen-live-badge { font-size: .68rem; padding: 3px 7px; gap: 4px; }
+
+      .speed-svg-gauge-box { width: 100%; max-width: 260px; height: 128px; }
+      .speed-digit-val { font-size: 2.45rem; }
+      .speed-digit-unit { font-size: .78rem; }
+      .speed-live-chart { padding: 11px; margin-bottom: 11px; }
+      .chart-label-row { font-size: .68rem; gap: 8px; }
+      .speed-metrics-grid { gap: 8px; }
+      .metric-card { padding: 8px 6px; }
+      .metric-label { font-size: .64rem; }
+      .metric-val { font-size: .92rem; }
+
+      .topo-card { padding: 13px; margin-bottom: 11px; }
+      .topo-header { font-size: .74rem; flex-wrap: wrap; gap: 5px; }
+      .dl-item-card { padding: 13px; margin-bottom: 10px; }
+      .dl-item-title { font-size: .85rem; gap: 8px; }
+      .dl-item-meta { font-size: .68rem; gap: 8px; }
+      .diag-item-grid { gap: 9px; margin-bottom: 10px; }
+      .diag-box { padding: 12px; }
+      .diag-box-title { font-size: .75rem; }
+      .diag-box-val { font-size: 1rem; }
+      .diag-box-sub { font-size: .66rem; }
+
+      .flclash-dock-wrap { padding-top: 12px; }
+      .flclash-dock { width: 100%; gap: 2px; padding: 4px; }
+      .dock-pill-btn { flex: 1; justify-content: center; gap: 3px; padding: 7px 4px; font-size: .7rem; }
+      .dock-pill-btn span { white-space: nowrap; }
+
+      /* Sections, cards, specs */
+      .section-wrap { padding: 44px 0; }
+      .section-heading { margin-bottom: 12px; }
+      .bento-grid { gap: 12px; }
+      .bento-card { padding: 20px 17px; }
+      .bento-icon-box { width: 42px; height: 42px; border-radius: 13px; font-size: 1.2rem; margin-bottom: 14px; }
+      .bento-card-title { margin-bottom: 8px; }
+      .bento-card-desc { font-size: .875rem; }
+      .bento-svg-holder { margin-top: 14px; padding: 8px; }
+
+      .specs-card-wrap { padding: 22px 17px; border-radius: 20px; margin-bottom: 34px; }
+      .specs-grid { grid-template-columns: 1fr; gap: 16px; margin: 20px 0; }
+      .spec-value { font-size: 1rem; }
+      .fingerprint-panel { flex-direction: column; align-items: flex-start; gap: 10px; padding: 14px; }
+      .fingerprint-panel > * { max-width: 100%; }
+      .fingerprint-panel code, .fingerprint-panel span[style*="mono"] { word-break: break-all; }
+
+      .faq-question { font-size: .9rem; padding: 14px 16px; gap: 10px; line-height: 1.55; }
+      .faq-answer { font-size: .85rem; padding: 0 16px 14px; }
+
+      .cta-banner { padding: 32px 18px; border-radius: 20px; }
+      .cta-banner p { font-size: .9rem !important; }
+      .cta-banner .btn { width: 100%; max-width: 320px; padding: 13px 16px !important; font-size: .88rem !important; }
+
+      .footer { padding: 28px 0 20px; }
+      .footer-wrap { flex-direction: column; gap: 14px; text-align: left; }
+      .footer-links { flex-wrap: wrap; gap: 10px 16px; font-size: .78rem; }
+    }
+
+    /* --- Small phone --- */
+    @media (max-width: 400px) {
+      .container { padding: 0 14px; }
+      .nav-brand { font-size: .95rem; gap: 6px; }
+      .nav-logo { width: 26px; height: 26px; }
+      .nav-actions .btn { font-size: .74rem; padding: 8px 10px; }
+      .nav-actions .btn-secondary { width: 36px; height: 36px; }
+      .hero-title { font-size: 1.3rem; }
+      .section-heading { font-size: 1.2rem; }
+      .speed-digit-val { font-size: 2.1rem; }
+      .dock-pill-btn { font-size: .64rem; }
+      .bento-card { padding: 17px 14px; }
+    }
+
+    /* --- Respect reduced-motion preferences --- */
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: .001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: .001ms !important;
       }
-      .nav-links {
-        display: none;
-      }
-      .nav {
-        padding: 14px 20px;
-      }
-      .speed-metrics-grid {
-        grid-template-columns: repeat(2, 1fr);
-      }
-      .diag-item-grid {
-        grid-template-columns: 1fr;
-      }
+      html { scroll-behavior: auto; }
     }
   </style>
 </head>
@@ -1037,7 +1193,8 @@
         <span>GitHub</span>
       </a>
       <a href="https://github.com/LianXia233/NetPulse/releases/latest" id="top-download-btn" class="btn btn-primary">
-        <span>下载 APK (v1.1.6)</span>
+        <span class="nav-dl-label">下载 APK (v1.1.6)</span>
+        <span class="nav-dl-label-short">APK</span>
       </a>
     </div>
   </header>
@@ -1051,7 +1208,7 @@
 
     <h1 class="hero-title">
       现代化 Android<br>
-      <span class="gradient-text">网络测速 · 极速分块下载 · 深度网络诊断</span>
+      <span class="gradient-text"><span class="nb">网络测速</span> · <span class="nb">极速分块下载</span><span class="sep-m"> · </span><br class="mob"><span class="nb">深度网络诊断</span></span>
     </h1>
 
     <p class="hero-desc">
@@ -1778,7 +1935,7 @@
       <div style="display: flex; justify-content: center; gap: 16px; flex-wrap: wrap;">
         <a href="https://github.com/LianXia233/NetPulse/releases/download/v1.1.6/NetPulse-1.1.6.apk" class="btn btn-primary" style="padding: 14px 34px; font-size: 1.02rem;">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
-          <span>下载 Privilege / NetPulse APK (v1.1.6)</span>
+          <span>下载 NetPulse APK (v1.1.6)</span>
         </a>
         <a href="https://github.com/LianXia233/NetPulse" target="_blank" class="btn btn-secondary" style="padding: 14px 28px;">
           <span>查看 GitHub 源代码</span>
@@ -1800,7 +1957,7 @@
         <a href="https://github.com/LianXia233/NetPulse">GitHub 源码</a>
         <a href="https://github.com/LianXia233/NetPulse/releases">版本发布</a>
         <a href="架构说明.md">技术架构</a>
-        <a href="../THIRD_PARTY_NOTICES.md">第三方声明</a>
+        <a href="https://github.com/LianXia233/NetPulse/blob/main/THIRD_PARTY_NOTICES.md" target="_blank" rel="noopener">第三方声明</a>
         <a href="https://github.com/LianXia233/NetPulse/issues">提交反馈</a>
       </div>
     </div>
