@@ -403,7 +403,7 @@ class MainActivity : FlutterActivity() {
                     "ip" to (link.address.hostAddress ?: ""),
                     "prefix" to link.prefixLength,
                     "family" to if (link.address is Inet4Address) "v4" else "v6",
-                    "broadcast" to (link.broadcast?.hostAddress ?: "")
+                    "broadcast" to ""
                 )
             }
             val gateway = lp.routes
