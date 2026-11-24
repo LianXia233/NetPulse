@@ -46,28 +46,6 @@ String encodeSpeedToml({
   return b.toString();
 }
 
-/// 从任意文本里提取 HTTP(S) URL 并按段落归类。
-/// 返回 (download, uploads)。[preferUploadContext] 决定无法判断归属时的兜底。
-List<String> _extractUrlsBySection(
-  String text,
-  String Function(String line) sectionOf,
-) {
-  final result = <String>[];
-  for (final line in text.split('\n')) {
-    final section = sectionOf(line);
-    for (final m in RegExp(_urlPattern).allMatches(line)) {
-      final url = m
-          .group(0)!
-          .replaceAll(RegExp(r'["\],;]+$'), '')
-          .replaceAll(RegExp(r'^["\[]+'), '')
-          .trim();
-      if (Uri.tryParse(url)?.host.isNotEmpty != true) continue;
-      result.add(section == 'upload' ? 'U$url' : url);
-    }
-  }
-  return result;
-}
-
 SpeedTomlConfig decodeSpeedToml(String text) {
   final download = <String>[];
   final uploads = <String>[];
@@ -112,14 +90,6 @@ SpeedTomlConfig decodeSpeedToml(String text) {
     r'^\s*(endpoints?|downloads?|urls?|servers?|dl)\s*=',
     caseSensitive: false,
   );
-
-  String sectionOf(String line) {
-    final lower = line.toLowerCase();
-    if (uploadKey.hasMatch(lower)) return 'upload';
-    if (downloadKey.hasMatch(lower)) return 'download';
-    // 无键名的裸行：看是否处于 [upload] / [download] TOML 段落之后
-    return '';
-  }
 
   var currentSection = '';
   for (final line in flattened) {
