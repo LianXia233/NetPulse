@@ -38,13 +38,100 @@ class _LanInfoPageState extends State<LanInfoPage> {
     pmToast(context, '已复制');
   }
 
+  bool _isPrivate(String ip) {
+    if (ip.contains(':')) {
+      final lower = ip.toLowerCase();
+      return lower.startsWith('fc') ||
+          lower.startsWith('fd') ||
+          lower.startsWith('fe8') ||
+          lower.startsWith('fe9') ||
+          lower.startsWith('fea') ||
+          lower.startsWith('feb');
+    }
+    final parts = ip.split('.');
+    if (parts.length != 4) return false;
+    final a = int.tryParse(parts[0]) ?? -1;
+    final b = int.tryParse(parts[1]) ?? -1;
+    return a == 10 ||
+        (a == 172 && b >= 16 && b <= 31) ||
+        (a == 192 && b == 168) ||
+        (a == 169 && b == 254);
+  }
+
+  String _speed(int kbps) {
+    if (kbps <= 0) return '—';
+    if (kbps >= 1000) return '${(kbps / 1000).toStringAsFixed(1)} Mbps';
+    return '$kbps Kbps';
+  }
+
+  String _nicSpeed(int mbps) => mbps > 0 ? '$mbps Mbps' : '系统未提供';
+
+  IconData _transportIcon(String transport) {
+    return switch (transport) {
+      'Wi-Fi' => Icons.wifi_rounded,
+      '蜂窝网络' => Icons.cell_tower_rounded,
+      '以太网' => Icons.settings_ethernet_rounded,
+      'VPN' => Icons.vpn_lock_rounded,
+      _ => Icons.lan_rounded,
+    };
+  }
+
+  IconData _nicIcon(String name, bool virtual) {
+    if (virtual) return Icons.memory_rounded;
+    if (name.startsWith('wlan')) return Icons.wifi_rounded;
+    if (name.startsWith('rmnet') || name.startsWith('ccmni')) {
+      return Icons.cell_tower_rounded;
+    }
+    if (name.startsWith('tun') || name.startsWith('ppp')) {
+      return Icons.vpn_lock_rounded;
+    }
+    return Icons.settings_ethernet_rounded;
+  }
+
+  String _addressLine(Map<String, dynamic> addr) {
+    final ip = addr['ip']?.toString() ?? '';
+    final prefix = (addr['prefix'] as num?)?.toInt() ?? 0;
+    return prefix > 0 ? '$ip/$prefix' : ip;
+  }
+
+  String _summary() {
+    final b = StringBuffer()
+      ..writeln('NetPulse 网络摘要')
+      ..writeln('${NativeInfo.networkType} · ${NativeInfo.interfaceName}')
+      ..writeln('IPv4: ${NativeInfo.localIp}${NativeInfo.ipPrefix > 0 ? '/${NativeInfo.ipPrefix}' : ''}')
+      ..writeln('IPv6: ${NativeInfo.ipv6.isEmpty ? '未分配' : NativeInfo.ipv6}')
+      ..writeln('网关: ${NativeInfo.gateway.isEmpty ? '—' : NativeInfo.gateway}')
+      ..writeln('DNS: ${NativeInfo.systemDns.isEmpty ? '—' : NativeInfo.systemDns.join(', ')}')
+      ..writeln('MAC: ${NativeInfo.macAddress.isEmpty ? '—' : NativeInfo.macAddress}')
+      ..writeln('MTU: ${NativeInfo.mtu}');
+    for (final net in NativeInfo.lanNetworks) {
+      b.writeln('[${net['transport']}] ${net['interface']} ${_addressLine(((net['addresses'] as List?)?.firstOrNull as Map?)?.cast<String, dynamic>() ?? const {})}');
+    }
+    return b.toString().trim();
+  }
+
   @override
   Widget build(BuildContext context) {
     final pm = context.pm;
     final scheme = context.scheme;
-    final active = NativeInfo.interfaces
-        .where((e) => e['loopback'] != 'true')
-        .toList();
+    final active = NativeInfo.lanActive;
+    final networks = [...NativeInfo.lanNetworks]..sort((a, b) {
+        final av = a['validated'] == true ? 1 : 0;
+        final bv = b['validated'] == true ? 1 : 0;
+        return bv.compareTo(av);
+      });
+    final interfaces = NativeInfo.lanInterfaces
+        .where((e) => e['loopback'] != true)
+        .toList()
+      ..sort((a, b) {
+        final au = a['up'] == true ? 1 : 0;
+        final bu = b['up'] == true ? 1 : 0;
+        if (au != bu) return bu.compareTo(au);
+        final av = a['virtual'] == true ? 1 : 0;
+        final bv = b['virtual'] == true ? 1 : 0;
+        if (av != bv) return av.compareTo(bv);
+        return (a['name']?.toString() ?? '').compareTo(b['name']?.toString() ?? '');
+      });
 
     return Scaffold(
       body: SafeArea(
@@ -52,66 +139,24 @@ class _LanInfoPageState extends State<LanInfoPage> {
         child: RefreshIndicator(
           onRefresh: _refresh,
           child: ListView(
-            padding: const EdgeInsets.fromLTRB(kPagePadding, 8, kPagePadding, 30),
+            padding: const EdgeInsets.fromLTRB(kPagePadding, 8, kPagePadding, 110),
             children: [
               PmPageHeader(
                 title: '局域网信息',
-                subtitle: 'Wi-Fi / 蜂窝 / 以太网 · 地址 · 网关 · DNS · 网卡',
+                subtitle: '活动网络 · 地址 · 网关 · DNS · 本机网卡',
                 showBack: true,
                 actions: [
+                  PmIconAction(
+                    icon: Icons.copy_all_rounded,
+                    onTap: () => _copy(_summary()),
+                  ),
                   PmIconAction(
                     icon: Icons.refresh_rounded,
                     onTap: _refreshing ? null : _refresh,
                   ),
                 ],
               ),
-              PmCard(
-                padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    Row(
-                      children: [
-                        PmIconBadge(
-                          NativeInfo.networkType == 'Wi-Fi'
-                              ? Icons.wifi_rounded
-                              : NativeInfo.networkType == '蜂窝网络'
-                                  ? Icons.cell_tower_rounded
-                                  : Icons.lan_rounded,
-                          size: 46,
-                          radius: 14,
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                NativeInfo.networkType,
-                                style: context.text.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
-                              ),
-                              const SizedBox(height: 3),
-                              Text(
-                                NativeInfo.interfaceName.isEmpty ? '活动网卡 —' : NativeInfo.interfaceName,
-                                style: context.text.bodySmall?.copyWith(color: pm.muted),
-                              ),
-                            ],
-                          ),
-                        ),
-                        PmPill(
-                          label: NativeInfo.localIp.isEmpty ? '未连接' : '在线',
-                          color: NativeInfo.localIp.isEmpty ? pm.warn : pm.ok,
-                          dense: true,
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    _ipLine(context, 'IPv4', NativeInfo.localIp, mono: true, onCopy: _copy),
-                    const SizedBox(height: 10),
-                    _ipLine(context, 'IPv6', NativeInfo.ipv6.isEmpty ? '未分配' : NativeInfo.ipv6, mono: true, onCopy: _copy),
-                  ],
-                ),
-              ),
+              _activeCard(context, pm, scheme, active),
               const SizedBox(height: 14),
               PmSectionTitle('网络参数'),
               PmCard(
@@ -127,95 +172,52 @@ class _LanInfoPageState extends State<LanInfoPage> {
                       context,
                       '链路速率',
                       NativeInfo.linkDownKbps > 0
-                          ? '↓ ${(NativeInfo.linkDownKbps / 1000).toStringAsFixed(1)} Mbps · ↑ ${(NativeInfo.linkUpKbps / 1000).toStringAsFixed(1)} Mbps'
+                          ? '↓ ${_speed(NativeInfo.linkDownKbps)} · ↑ ${_speed(NativeInfo.linkUpKbps)}'
                           : '系统未提供',
+                    ),
+                    _kvRow(context, '私有 DNS', NativeInfo.privateDns.isEmpty ? '未启用' : NativeInfo.privateDns),
+                    _kvRow(
+                      context,
+                      '网络状态',
+                      [
+                        NativeInfo.validated ? '已验证联网' : '未验证',
+                        NativeInfo.metered ? '计费网络' : '非计费',
+                        if (NativeInfo.vpn) 'VPN',
+                      ].join(' · '),
                     ),
                   ],
                 ),
               ),
+              if (networks.isNotEmpty) ...[
+                const SizedBox(height: 14),
+                PmSectionTitle('活动网络（${networks.length}）', subtitle: 'Android 已注册的网络与对应接口'),
+                for (final net in networks)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _networkCard(context, pm, scheme, net),
+                  ),
+              ],
               const SizedBox(height: 14),
-              PmSectionTitle('DNS 服务器'),
-              PmCard(
-                padding: const EdgeInsets.fromLTRB(14, 12, 14, 4),
-                child: Column(
-                  children: [
-                    if (NativeInfo.systemDns.isEmpty)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: Text('未获取到系统 DNS', style: context.text.bodySmall?.copyWith(color: pm.muted)),
-                      )
-                    else
-                      for (final dns in NativeInfo.systemDns)
-                        Padding(
-                          padding: const EdgeInsets.only(bottom: 9),
-                          child: Row(
-                            children: [
-                              Icon(Icons.dns_rounded, size: 16, color: scheme.primary),
-                              const SizedBox(width: 8),
-                              Expanded(
-                                child: Text(
-                                  dns,
-                                  style: context.text.bodySmall?.copyWith(
-                                    fontFeatures: const [FontFeature.tabularFigures()],
-                                  ),
-                                ),
-                              ),
-                              PmPressable(
-                                onTap: () => _copy(dns),
-                                child: Icon(Icons.copy_rounded, size: 16, color: pm.muted),
-                              ),
-                            ],
-                          ),
-                        ),
-                  ],
-                ),
+              PmSectionTitle(
+                '本机网卡（${interfaces.length}）',
+                subtitle: '地址、前缀、MAC、MTU 与链路速率',
               ),
-              const SizedBox(height: 14),
-              PmSectionTitle('本机网卡（${active.length}）', subtitle: '已过滤回环与虚拟接口'),
-              PmCard(
-                padding: const EdgeInsets.fromLTRB(14, 8, 14, 8),
-                child: Column(
-                  children: [
-                    for (final it in active)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 8),
-                        child: Row(
-                          children: [
-                            PmIconBadge(
-                              it['name']?.toString().startsWith('wlan') == true
-                                  ? Icons.wifi_rounded
-                                  : Icons.settings_ethernet_rounded,
-                              size: 30,
-                              radius: 9,
-                            ),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(it['name']?.toString() ?? '—', style: context.text.bodyMedium),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    it['ip']?.toString() ?? '—',
-                                    style: context.text.bodySmall?.copyWith(
-                                      color: pm.muted,
-                                      fontFeatures: const [FontFeature.tabularFigures()],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            PmPressable(
-                              onTap: () => _copy(it['ip']?.toString() ?? ''),
-                              child: Icon(Icons.copy_rounded, size: 16, color: pm.muted),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-              const SizedBox(height: 12),
+              if (interfaces.isEmpty)
+                PmCard(
+               
+                  padding: const EdgeInsets.all(18),
+                  child: Text(
+                    '未获取到网卡信息',
+                    style: context.text.bodySmall?.copyWith(color: pm.muted),
+                  ),
+                )
+              else
+                for (final net in interfaces)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 10),
+                    child: _interfaceCard(context, pm, scheme, net),
+                  ),
+              const SizedBox(height: 6),
               PmCard(
                 padding: const EdgeInsets.all(14),
                 child: Row(
@@ -225,7 +227,8 @@ class _LanInfoPageState extends State<LanInfoPage> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        '数据由 Android 系统网络栈提供，仅显示本机已连接的接口；不发起外部扫描或探测。',
+                        '数据来自 Android ConnectivityManager / NetworkInterface 与 /sys/class/net；'
+                        '仅显示本机已注册接口，不发起外部扫描或探测。',
                         style: context.text.bodySmall?.copyWith(color: pm.muted, height: 1.45),
                       ),
                     ),
@@ -235,6 +238,265 @@ class _LanInfoPageState extends State<LanInfoPage> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _activeCard(
+    BuildContext context,
+    dynamic pm,
+    ColorScheme scheme,
+    Map<String, dynamic> active,
+  ) {
+    final v4 = NativeInfo.localIp;
+    final v6 = NativeInfo.ipv6;
+    return PmCard(
+      padding: const EdgeInsets.fromLTRB(18, 16, 18, 18),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              PmIconBadge(
+                _transportIcon(NativeInfo.networkType),
+                size: 46,
+                radius: 14,
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      NativeInfo.networkType,
+                      style: context.text.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      NativeInfo.interfaceName.isEmpty ? '活动网卡 —' : NativeInfo.interfaceName,
+                      style: context.text.bodySmall?.copyWith(color: pm.muted),
+                    ),
+                  ],
+                ),
+              ),
+              PmPill(
+                label: NativeInfo.localIp.isEmpty ? '未连接' : '在线',
+                color: NativeInfo.localIp.isEmpty ? pm.warn : pm.ok,
+                dense: true,
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: [
+              if (NativeInfo.validated) PmPill(label: '已验证联网', color: pm.ok, dense: true),
+              if (NativeInfo.metered) PmPill(label: '计费网络', color: pm.warn, dense: true),
+              if (NativeInfo.vpn) PmPill(label: 'VPN', color: scheme.primary, dense: true),
+              if (v4.isNotEmpty && _isPrivate(v4))
+                PmPill(label: '内网 IPv4', color: scheme.primary, dense: true),
+            ],
+          ),
+          const SizedBox(height: 14),
+          _ipLine(
+            context,
+            'IPv4',
+            v4.isEmpty ? '未分配' : '$v4${NativeInfo.ipPrefix > 0 ? '/${NativeInfo.ipPrefix}' : ''}',
+            mono: true,
+            onCopy: _copy,
+          ),
+          const SizedBox(height: 10),
+          _ipLine(
+            context,
+            'IPv6',
+            v6.isEmpty ? '未分配' : v6,
+            mono: true,
+            onCopy: _copy,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _networkCard(BuildContext context, dynamic pm, ColorScheme scheme, Map<String, dynamic> net) {
+    final addresses = (net['addresses'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => e.cast<String, dynamic>())
+        .toList();
+    final dns = (net['dns'] as List? ?? const []).map((e) => e.toString()).toList();
+    final transport = net['transport']?.toString() ?? '其他';
+    return PmCard(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              PmIconBadge(_transportIcon(transport), size: 34, radius: 10),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(transport, style: context.text.titleSmall),
+                    Text(
+                      net['interface']?.toString().isEmpty == true
+                          ? '无接口名'
+                          : net['interface']?.toString() ?? '',
+                      style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              if (net['validated'] == true) PmPill(label: '已验证', color: pm.ok, dense: true),
+              if (net['metered'] == true) ...[
+                const SizedBox(width: 5),
+                PmPill(label: '计费', color: pm.warn, dense: true),
+              ],
+            ],
+          ),
+          const SizedBox(height: 8),
+          for (final addr in addresses)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: Row(
+                children: [
+                  PmPill(label: (addr['family']?.toString() ?? 'ip').toUpperCase(), dense: true),
+                  const SizedBox(width: 7),
+                  Expanded(
+                    child: Text(
+                      _addressLine(addr),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.text.bodySmall?.copyWith(
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
+                  PmPressable(
+                    onTap: () => _copy(addr['ip']?.toString() ?? ''),
+                    child: Icon(Icons.copy_rounded, size: 14, color: pm.muted),
+                  ),
+                ],
+              ),
+            ),
+          if ((net['gateway']?.toString() ?? '').isNotEmpty)
+            _miniRow(context, '网关', net['gateway'].toString(), onCopy: _copy),
+          if (dns.isNotEmpty) _miniRow(context, 'DNS', dns.join(' · ')),
+          if ((net['privateDns']?.toString() ?? '').isNotEmpty)
+            _miniRow(context, '私有 DNS', net['privateDns'].toString()),
+          if ((net['httpProxy']?.toString() ?? '').isNotEmpty)
+            _miniRow(context, '代理', net['httpProxy'].toString()),
+        ],
+      ),
+    );
+  }
+
+  Widget _interfaceCard(BuildContext context, dynamic pm, ColorScheme scheme, Map<String, dynamic> net) {
+    final name = net['name']?.toString() ?? '—';
+    final virtual = net['virtual'] == true;
+    final up = net['up'] == true;
+    final addresses = (net['addresses'] as List? ?? const [])
+        .whereType<Map>()
+        .map((e) => e.cast<String, dynamic>())
+        .toList();
+    return PmCard(
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              PmIconBadge(_nicIcon(name, virtual), size: 32, radius: 9),
+              const SizedBox(width: 10),
+              Expanded(child: Text(name, style: context.text.titleSmall)),
+              PmPill(
+                label: up ? 'UP' : 'DOWN',
+                color: up ? pm.ok : pm.muted,
+                dense: true,
+              ),
+              if (virtual) ...[
+                const SizedBox(width: 5),
+                PmPill(label: '虚拟', color: scheme.primary, dense: true),
+              ],
+            ],
+          ),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 12,
+            runSpacing: 4,
+            children: [
+              if ((net['mac']?.toString() ?? '').isNotEmpty)
+                Text(
+                  'MAC ${net['mac']}',
+                  style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
+                ),
+              Text(
+                'MTU ${net['mtu'] ?? '—'}',
+                style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
+              ),
+              Text(
+                '速率 ${_nicSpeed((net['speedMbps'] as num?)?.toInt() ?? 0)}',
+                style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          for (final addr in addresses)
+            Padding(
+              padding: const EdgeInsets.only(top: 3),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _addressLine(addr),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.text.bodySmall?.copyWith(
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ),
+                  PmPressable(
+                    onTap: () => _copy(addr['ip']?.toString() ?? ''),
+                    child: Icon(Icons.copy_rounded, size: 14, color: pm.muted),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _miniRow(BuildContext context, String label, String value, {void Function(String)? onCopy}) {
+    final pm = context.pm;
+    return Padding(
+      padding: const EdgeInsets.only(top: 4),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 54,
+            child: Text(
+              label,
+              style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              value,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: context.text.bodySmall?.copyWith(fontSize: 11.5),
+            ),
+          ),
+          if (onCopy != null)
+            PmPressable(
+              onTap: () => onCopy(value),
+              child: Icon(Icons.copy_rounded, size: 14, color: pm.muted),
+            ),
+        ],
       ),
     );
   }

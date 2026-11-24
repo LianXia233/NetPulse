@@ -261,6 +261,13 @@ class NativeInfo {
   static int linkUpKbps = 0;
   static List<String> systemDns = [];
   static List<Map<String, String>> interfaces = [];
+  static bool validated = false;
+  static bool metered = false;
+  static bool vpn = false;
+  static String privateDns = '';
+  static Map<String, dynamic> lanActive = {};
+  static List<Map<String, dynamic>> lanNetworks = [];
+  static List<Map<String, dynamic>> lanInterfaces = [];
   static bool initialized = false;
 
   static Future<void> load() async {
@@ -275,20 +282,65 @@ class NativeInfo {
     } catch (_) {
       filesDir = Directory.systemTemp.path;
     }
-    try {
-      final net = await _channel.invokeMapMethod<String, dynamic>('network');
-      _applyNetwork(net);
-    } catch (_) {}
-    await loadInterfaces();
+    await _reloadNetwork();
     initialized = true;
   }
 
   static Future<void> refreshNetwork() async {
+    await _reloadNetwork();
+  }
+
+  static Future<void> _reloadNetwork() async {
+    try {
+      final lan = await _channel.invokeMapMethod<String, dynamic>('lanInfo');
+      if (lan != null) {
+        _applyLanInfo(lan);
+        return;
+      }
+    } catch (_) {}
     try {
       final net = await _channel.invokeMapMethod<String, dynamic>('network');
       _applyNetwork(net);
     } catch (_) {}
     await loadInterfaces();
+  }
+
+  static List<Map<String, dynamic>> _mapList(Object? value) {
+    if (value is! List) return const [];
+    return value
+        .whereType<Map>()
+        .map((e) => e.cast<String, dynamic>())
+        .toList();
+  }
+
+  static void _applyLanInfo(Map<String, dynamic> lan) {
+    final active = lan['active'];
+    if (active is Map) {
+      lanActive = active.cast<String, dynamic>();
+      _applyNetwork(lanActive);
+    }
+    lanNetworks = _mapList(lan['networks']);
+    lanInterfaces = _mapList(lan['interfaces']);
+    final flat = <Map<String, String>>[];
+    for (final it in lanInterfaces) {
+      final addresses = it['addresses'];
+      if (addresses is! List) continue;
+      for (final addr in addresses) {
+        if (addr is! Map) continue;
+        final ip = addr['ip']?.toString() ?? '';
+        if (ip.isEmpty) continue;
+        flat.add({
+          'name': it['name']?.toString() ?? '',
+          'ip': ip,
+          'prefix': addr['prefix']?.toString() ?? '',
+          'family': addr['family']?.toString() ?? '',
+          'loopback': it['loopback']?.toString() ?? 'false',
+          'virtual': it['virtual']?.toString() ?? 'false',
+          'mac': it['mac']?.toString() ?? '',
+        });
+      }
+    }
+    interfaces = flat;
   }
 
   static void _applyNetwork(Map<String, dynamic>? net) {
@@ -304,6 +356,10 @@ class NativeInfo {
     mtu = (net['mtu'] as num? ?? 0).toInt();
     linkDownKbps = (net['linkDownKbps'] as num? ?? 0).toInt();
     linkUpKbps = (net['linkUpKbps'] as num? ?? 0).toInt();
+    validated = net['validated'] == true;
+    metered = net['metered'] == true;
+    vpn = net['vpn'] == true;
+    privateDns = net['privateDns']?.toString() ?? '';
     final dns = net['dns'];
     if (dns is List) systemDns = dns.map((e) => e.toString()).toList();
   }

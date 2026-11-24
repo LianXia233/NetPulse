@@ -66,6 +66,7 @@ class MainActivity : FlutterActivity() {
                 "selectDirectory" -> selectDirectory(result)
                 "prepareDownloadDir" -> prepareDownloadDir(result)
                 "interfaces" -> result.success(localInterfaces())
+                "lanInfo" -> result.success(lanInfo())
                 "pickTextFile" -> {
                     pendingFileResult = result
                     try {
@@ -372,6 +373,106 @@ class MainActivity : FlutterActivity() {
         }?.trim()?.takeIf { it.startsWith("http://") || it.startsWith("https://") }
     }
 
+    private fun transportOf(caps: NetworkCapabilities?): String = when {
+        caps == null -> "未知"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "Wi-Fi"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "蜂窝网络"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "以太网"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN) -> "VPN"
+        caps.hasTransport(NetworkCapabilities.TRANSPORT_BLUETOOTH) -> "蓝牙"
+        else -> "其他"
+    }
+
+    private fun readLinkSpeed(name: String): Int {
+        return try {
+            File("/sys/class/net/$name/speed").readText().trim().toIntOrNull() ?: 0
+        } catch (_: Exception) {
+            0
+        }
+    }
+
+    /// 一次返回活动网络、全部已注册网络和全部本机网卡的详细参数。
+    private fun lanInfo(): Map<String, Any?> {
+        val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val networks = ArrayList<Map<String, Any?>>()
+        for (network in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(network) ?: continue
+            val lp = cm.getLinkProperties(network) ?: continue
+            val addresses = lp.linkAddresses.map { link ->
+                mapOf(
+                    "ip" to (link.address.hostAddress ?: ""),
+                    "prefix" to link.prefixLength,
+                    "family" to if (link.address is Inet4Address) "v4" else "v6",
+                    "broadcast" to (link.broadcast?.hostAddress ?: "")
+                )
+            }
+            val gateway = lp.routes
+                .firstOrNull { it.isDefaultRoute && it.gateway != null }
+                ?.gateway?.hostAddress ?: ""
+            networks.add(
+                mapOf(
+                    "id" to network.toString(),
+                    "transport" to transportOf(caps),
+                    "interface" to (lp.interfaceName ?: ""),
+                    "addresses" to addresses,
+                    "dns" to lp.dnsServers.mapNotNull { it.hostAddress },
+                    "gateway" to gateway,
+                    "mtu" to lp.mtu,
+                    "validated" to caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED),
+                    "internet" to caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET),
+                    "metered" to !caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED),
+                    "vpn" to caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN),
+                    "downKbps" to caps.linkDownstreamBandwidthKbps,
+                    "upKbps" to caps.linkUpstreamBandwidthKbps,
+                    "privateDns" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        lp.privateDnsServerName ?: ""
+                    } else {
+                        ""
+                    },
+                    "httpProxy" to (lp.httpProxy?.toString() ?: "")
+                )
+            )
+        }
+
+        val interfaces = ArrayList<Map<String, Any?>>()
+        for (nif in NetworkInterface.getNetworkInterfaces()) {
+            val addresses = nif.interfaceAddresses.mapNotNull { ia ->
+                val ip = ia.address?.hostAddress ?: return@mapNotNull null
+                mapOf(
+                    "ip" to ip,
+                    "prefix" to ia.networkPrefixLength.toInt(),
+                    "family" to if (ia.address is Inet4Address) "v4" else "v6",
+                    "broadcast" to (ia.broadcast?.hostAddress ?: "")
+                )
+            }
+            val mac = try {
+                nif.hardwareAddress?.joinToString(":") { b -> "%02X".format(b) } ?: ""
+            } catch (_: Exception) {
+                ""
+            }
+            interfaces.add(
+                mapOf(
+                    "name" to nif.name,
+                    "index" to nif.index,
+                    "up" to nif.isUp,
+                    "loopback" to nif.isLoopback,
+                    "virtual" to nif.isVirtual,
+                    "pointToPoint" to nif.isPointToPoint,
+                    "multicast" to nif.supportsMulticast(),
+                    "mac" to mac,
+                    "mtu" to nif.mtu,
+                    "speedMbps" to readLinkSpeed(nif.name),
+                    "addresses" to addresses
+                )
+            )
+        }
+        return mapOf(
+            "active" to networkInfo(),
+            "networks" to networks,
+            "interfaces" to interfaces
+        )
+    }
+
     private fun prefixToMask(prefix: Int): String {
         val m = if (prefix == 0) 0L else (0xffffffffL shl (32 - prefix)) and 0xffffffffL
         return listOf(24, 16, 8, 0).joinToString(".") { shift ->
@@ -426,7 +527,15 @@ class MainActivity : FlutterActivity() {
             "dns" to dns,
             "online" to hasInternet,
             "linkDownKbps" to (caps?.linkDownstreamBandwidthKbps ?: 0),
-            "linkUpKbps" to (caps?.linkUpstreamBandwidthKbps ?: 0)
+            "linkUpKbps" to (caps?.linkUpstreamBandwidthKbps ?: 0),
+            "validated" to (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ?: false),
+            "metered" to (caps?.let { !it.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) } ?: false),
+            "vpn" to (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) ?: false),
+            "privateDns" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                lp?.privateDnsServerName ?: ""
+            } else {
+                ""
+            }
         )
     }
 }
