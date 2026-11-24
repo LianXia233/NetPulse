@@ -383,12 +383,57 @@ class MainActivity : FlutterActivity() {
         else -> "其他"
     }
 
+    private fun readMac(name: String): String {
+        return try {
+            val value = File("/sys/class/net/$name/address").readText().trim().uppercase()
+            if (Regex("^([0-9A-F]{2}:){5}[0-9A-F]{2}$").matches(value)) value else ""
+        } catch (_: Exception) {
+            ""
+        }
+    }
+
+    private fun readMtu(name: String): Int {
+        return try {
+            File("/sys/class/net/$name/mtu").readText().trim().toIntOrNull() ?: 0
+        } catch (_: Exception) {
+            0
+        }
+    }
+
     private fun readLinkSpeed(name: String): Int {
         return try {
             File("/sys/class/net/$name/speed").readText().trim().toIntOrNull() ?: 0
         } catch (_: Exception) {
             0
         }
+    }
+
+    private fun wifiInfo(): android.net.wifi.WifiInfo? {
+        return try {
+            val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as android.net.wifi.WifiManager
+            wm.connectionInfo
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private fun wifiStandardName(standard: Int): String = when (standard) {
+        1 -> "11a"
+        2 -> "11b"
+        3 -> "11g"
+        4 -> "11n"
+        5 -> "11ac"
+        6 -> "11ax"
+        7 -> "11ad"
+        8 -> "11be"
+        else -> ""
+    }
+
+    private fun isUsableMac(value: String?): Boolean {
+        if (value.isNullOrBlank()) return false
+        val normalized = value.trim().uppercase()
+        return normalized != "02:00:00:00:00:00" &&
+            Regex("^([0-9A-F]{2}:){5}[0-9A-F]{2}$").matches(normalized)
     }
 
     /// 一次返回活动网络、全部已注册网络和全部本机网卡的详细参数。
@@ -445,10 +490,12 @@ class MainActivity : FlutterActivity() {
                     "broadcast" to (ia.broadcast?.hostAddress ?: "")
                 )
             }
-            val mac = try {
-                nif.hardwareAddress?.joinToString(":") { b -> "%02X".format(b) } ?: ""
-            } catch (_: Exception) {
-                ""
+            val mac = readMac(nif.name).ifEmpty {
+                try {
+                    nif.hardwareAddress?.joinToString(":") { b -> "%02X".format(b) } ?: ""
+                } catch (_: Exception) {
+                    ""
+                }
             }
             interfaces.add(
                 mapOf(
@@ -460,7 +507,8 @@ class MainActivity : FlutterActivity() {
                     "pointToPoint" to nif.isPointToPoint,
                     "multicast" to nif.supportsMulticast(),
                     "mac" to mac,
-                    "mtu" to nif.mtu,
+                    "macHidden" to (nif.name.startsWith("wlan") && mac.isEmpty()),
+                    "mtu" to (nif.mtu.takeIf { it > 0 } ?: readMtu(nif.name)),
                     "speedMbps" to readLinkSpeed(nif.name),
                     "addresses" to addresses
                 )
@@ -504,30 +552,84 @@ class MainActivity : FlutterActivity() {
             ?.filter { !it.contains('%') && !it.startsWith("fe80") }
             ?.take(2)
             ?.joinToString(", ") ?: ""
-        val gateway = lp?.routes
-            ?.firstOrNull { it.isDefaultRoute && it.gateway != null }
-            ?.gateway?.hostAddress ?: ""
+        val defaultRoutes = lp?.routes?.filter { it.isDefaultRoute && it.gateway != null } ?: emptyList()
+        val gateway4 = defaultRoutes.firstOrNull { it.gateway is Inet4Address }?.gateway?.hostAddress ?: ""
+        val gateway6 = defaultRoutes.firstOrNull { it.gateway is Inet6Address }?.gateway?.hostAddress ?: ""
+        val gateway = gateway4.ifEmpty { gateway6 }
         val ifName = lp?.interfaceName ?: ""
-        val mac = try {
-            NetworkInterface.getByName(ifName)?.hardwareAddress
-                ?.joinToString(":") { b -> "%02X".format(b) } ?: ""
-        } catch (_: Exception) { "" }
+        val nif = try { NetworkInterface.getByName(ifName) } catch (_: Exception) { null }
+        val wifi = if (caps?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true) wifiInfo() else null
+        val wifiMac = wifi?.macAddress
+        val mac = readMac(ifName).ifEmpty {
+            try {
+                nif?.hardwareAddress?.joinToString(":") { b -> "%02X".format(b) } ?: ""
+            } catch (_: Exception) {
+                ""
+            }
+        }.ifEmpty { if (isUsableMac(wifiMac)) wifiMac!!.uppercase() else "" }
+        val mtuValue = (lp?.mtu ?: 0).takeIf { it > 0 }
+            ?: (nif?.mtu ?: 0).takeIf { it > 0 }
+            ?: readMtu(ifName)
         val dns = lp?.dnsServers?.mapNotNull { it.hostAddress } ?: emptyList<String>()
         val hasInternet = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) ?: false
+        val wifiTx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            (wifi?.txLinkSpeedMbps ?: 0).coerceAtLeast(0)
+        } else {
+            0
+        }
+        val wifiRx = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            (wifi?.rxLinkSpeedMbps ?: 0).coerceAtLeast(0)
+        } else {
+            0
+        }
+        val legacyWifi = wifi?.linkSpeed?.coerceAtLeast(0) ?: 0
+        val sysSpeed = readLinkSpeed(ifName).coerceAtLeast(0)
+        val downKbps = when {
+            wifiRx > 0 -> wifiRx * 1000
+            sysSpeed > 0 -> sysSpeed * 1000
+            else -> caps?.linkDownstreamBandwidthKbps ?: 0
+        }
+        val upKbps = when {
+            wifiTx > 0 -> wifiTx * 1000
+            sysSpeed > 0 -> sysSpeed * 1000
+            else -> caps?.linkUpstreamBandwidthKbps ?: 0
+        }
+        val linkSource = when {
+            wifiRx > 0 || wifiTx > 0 || legacyWifi > 0 -> "wifi"
+            sysSpeed > 0 -> "sysfs"
+            else -> "estimate"
+        }
+        val wifiStandard = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            wifiStandardName(wifi?.wifiStandard ?: 0)
+        } else {
+            ""
+        }
+        val wifiSsid = wifi?.ssid?.takeIf { it.isNotBlank() && it != "<unknown ssid>" } ?: ""
+        val wifiBssid = wifi?.bssid?.takeIf { isUsableMac(it) } ?: ""
+        val wifiFreq = wifi?.frequency ?: 0
+        val wifiRssi = wifi?.rssi ?: 0
         return mapOf(
             "type" to type,
             "ip" to ip,
             "prefix" to prefix,
             "netmask" to netmask,
             "gateway" to gateway,
+            "gateway6" to gateway6,
             "ipv6" to ipv6,
             "interface" to ifName,
             "mac" to mac,
-            "mtu" to (lp?.mtu ?: 0),
+            "macHidden" to (wifi != null && mac.isEmpty()),
+            "mtu" to mtuValue,
             "dns" to dns,
             "online" to hasInternet,
-            "linkDownKbps" to (caps?.linkDownstreamBandwidthKbps ?: 0),
-            "linkUpKbps" to (caps?.linkUpstreamBandwidthKbps ?: 0),
+            "linkDownKbps" to downKbps,
+            "linkUpKbps" to upKbps,
+            "linkSource" to linkSource,
+            "wifiSsid" to wifiSsid,
+            "wifiBssid" to wifiBssid,
+            "wifiStandard" to wifiStandard,
+            "wifiFrequency" to wifiFreq,
+            "wifiRssi" to wifiRssi,
             "validated" to (caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED) ?: false),
             "metered" to (caps?.let { !it.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) } ?: false),
             "vpn" to (caps?.hasTransport(NetworkCapabilities.TRANSPORT_VPN) ?: false),

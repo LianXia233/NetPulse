@@ -253,6 +253,7 @@ class NativeInfo {
   static int ipPrefix = 0;
   static String netmask = '';
   static String gateway = '';
+  static String gateway6 = '';
   static String ipv6 = '';
   static String interfaceName = '';
   static String macAddress = '';
@@ -264,7 +265,14 @@ class NativeInfo {
   static bool validated = false;
   static bool metered = false;
   static bool vpn = false;
+  static bool macHidden = false;
   static String privateDns = '';
+  static String linkSource = '';
+  static String wifiSsid = '';
+  static String wifiBssid = '';
+  static String wifiStandard = '';
+  static int wifiFrequency = 0;
+  static int wifiRssi = 0;
   static Map<String, dynamic> lanActive = {};
   static List<Map<String, dynamic>> lanNetworks = [];
   static List<Map<String, dynamic>> lanInterfaces = [];
@@ -350,6 +358,7 @@ class NativeInfo {
     ipPrefix = (net['prefix'] as num? ?? 0).toInt();
     netmask = net['netmask']?.toString() ?? '';
     gateway = net['gateway']?.toString() ?? '';
+    gateway6 = net['gateway6']?.toString() ?? '';
     ipv6 = net['ipv6']?.toString() ?? '';
     interfaceName = net['interface']?.toString() ?? '';
     macAddress = net['mac']?.toString() ?? '';
@@ -359,7 +368,14 @@ class NativeInfo {
     validated = net['validated'] == true;
     metered = net['metered'] == true;
     vpn = net['vpn'] == true;
+    macHidden = net['macHidden'] == true;
     privateDns = net['privateDns']?.toString() ?? '';
+    linkSource = net['linkSource']?.toString() ?? '';
+    wifiSsid = net['wifiSsid']?.toString() ?? '';
+    wifiBssid = net['wifiBssid']?.toString() ?? '';
+    wifiStandard = net['wifiStandard']?.toString() ?? '';
+    wifiFrequency = (net['wifiFrequency'] as num? ?? 0).toInt();
+    wifiRssi = (net['wifiRssi'] as num? ?? 0).toInt();
     final dns = net['dns'];
     if (dns is List) systemDns = dns.map((e) => e.toString()).toList();
   }

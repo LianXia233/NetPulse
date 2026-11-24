@@ -66,6 +66,13 @@ class _LanInfoPageState extends State<LanInfoPage> {
 
   String _nicSpeed(int mbps) => mbps > 0 ? '$mbps Mbps' : '系统未提供';
 
+  String _bandLabel(int mhz) {
+    if (mhz <= 0) return '';
+    if (mhz < 3000) return ' · 2.4 GHz';
+    if (mhz < 5925) return ' · 5 GHz';
+    return ' · 6 GHz';
+  }
+
   IconData _transportIcon(String transport) {
     return switch (transport) {
       'Wi-Fi' => Icons.wifi_rounded,
@@ -116,9 +123,11 @@ class _LanInfoPageState extends State<LanInfoPage> {
     final scheme = context.scheme;
     final active = NativeInfo.lanActive;
     final networks = [...NativeInfo.lanNetworks]..sort((a, b) {
-        final av = a['validated'] == true ? 1 : 0;
-        final bv = b['validated'] == true ? 1 : 0;
-        return bv.compareTo(av);
+        int rank(Map<String, dynamic> net) {
+          if ((net['interface']?.toString() ?? '') == NativeInfo.interfaceName) return 0;
+          return net['validated'] == true ? 1 : 2;
+        }
+        return rank(a).compareTo(rank(b));
       });
     final interfaces = NativeInfo.lanInterfaces
         .where((e) => e['loopback'] != true)
@@ -147,7 +156,7 @@ class _LanInfoPageState extends State<LanInfoPage> {
                 showBack: true,
                 actions: [
                   PmIconAction(
-                    icon: Icons.copy_all_rounded,
+                    icon: Icons.copy_rounded,
                     onTap: () => _copy(_summary()),
                   ),
                   PmIconAction(
@@ -165,16 +174,48 @@ class _LanInfoPageState extends State<LanInfoPage> {
                   children: [
                     _kvRow(context, '子网掩码', NativeInfo.netmask.isEmpty ? '—' : NativeInfo.netmask, mono: true),
                     _kvRow(context, '前缀长度', NativeInfo.ipPrefix > 0 ? '/${NativeInfo.ipPrefix}' : '—'),
-                    _kvRow(context, '默认网关', NativeInfo.gateway.isEmpty ? '—' : NativeInfo.gateway, mono: true, onCopy: _copy),
-                    _kvRow(context, 'MAC 地址', NativeInfo.macAddress.isEmpty ? '—' : NativeInfo.macAddress, mono: true),
+                    _kvRow(context, 'IPv4 网关', NativeInfo.gateway.isEmpty ? '—' : NativeInfo.gateway, mono: true, onCopy: _copy),
+                    if (NativeInfo.gateway6.isNotEmpty)
+                      _kvRow(context, 'IPv6 网关', NativeInfo.gateway6, mono: true, onCopy: _copy),
+                    _kvRow(
+                      context,
+                      'MAC 地址',
+                      NativeInfo.macAddress.isNotEmpty
+                          ? NativeInfo.macAddress
+                          : (NativeInfo.macHidden ? '系统已隐藏（Android 10+）' : '系统未提供'),
+                      mono: true,
+                    ),
                     _kvRow(context, 'MTU', NativeInfo.mtu > 0 ? '${NativeInfo.mtu} bytes' : '—'),
                     _kvRow(
                       context,
                       '链路速率',
                       NativeInfo.linkDownKbps > 0
-                          ? '↓ ${_speed(NativeInfo.linkDownKbps)} · ↑ ${_speed(NativeInfo.linkUpKbps)}'
+                          ? '${NativeInfo.linkSource == 'estimate' ? '≈ ' : ''}↓ ${_speed(NativeInfo.linkDownKbps)} · ↑ ${_speed(NativeInfo.linkUpKbps)}'
                           : '系统未提供',
                     ),
+                    if (NativeInfo.linkSource == 'estimate' && NativeInfo.linkDownKbps > 0)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 76, bottom: 4),
+                        child: Text(
+                          '系统只提供带宽估算值；Wi-Fi/以太网真实协商速率需要硬件或系统权限。',
+                          style: context.text.bodySmall?.copyWith(
+                            color: pm.muted,
+                            fontSize: 10.5,
+                          ),
+                        ),
+                      ),
+                    if (NativeInfo.wifiStandard.isNotEmpty)
+                      _kvRow(context, 'Wi-Fi 标准', NativeInfo.wifiStandard),
+                    if (NativeInfo.wifiFrequency > 0)
+                      _kvRow(
+                        context,
+                        'Wi-Fi 频段',
+                        '${NativeInfo.wifiFrequency} MHz${_bandLabel(NativeInfo.wifiFrequency)}',
+                      ),
+                    if (NativeInfo.wifiRssi != 0)
+                      _kvRow(context, 'Wi-Fi 信号', '${NativeInfo.wifiRssi} dBm'),
+                    if (NativeInfo.wifiSsid.isNotEmpty)
+                      _kvRow(context, 'Wi-Fi SSID', NativeInfo.wifiSsid),
                     _kvRow(context, '私有 DNS', NativeInfo.privateDns.isEmpty ? '未启用' : NativeInfo.privateDns),
                     _kvRow(
                       context,
@@ -227,8 +268,9 @@ class _LanInfoPageState extends State<LanInfoPage> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        '数据来自 Android ConnectivityManager / NetworkInterface 与 /sys/class/net；'
-                        '仅显示本机已注册接口，不发起外部扫描或探测。',
+                        '数据来自 Android ConnectivityManager / NetworkInterface 与 Wi-Fi 链路信息；'
+                        'Android 10+ 对普通应用隐藏 Wi-Fi MAC，部分 ROM 只提供带宽估算值。'
+                        '仅显示本机接口，不发起外部扫描或探测。',
                         style: context.text.bodySmall?.copyWith(color: pm.muted, height: 1.45),
                       ),
                     ),
@@ -349,6 +391,10 @@ class _LanInfoPageState extends State<LanInfoPage> {
                   ],
                 ),
               ),
+              if ((net['interface']?.toString() ?? '') == NativeInfo.interfaceName) ...[
+                PmPill(label: '当前', color: scheme.primary, dense: true),
+                const SizedBox(width: 5),
+              ],
               if (net['validated'] == true) PmPill(label: '已验证', color: pm.ok, dense: true),
               if (net['metered'] == true) ...[
                 const SizedBox(width: 5),
@@ -431,13 +477,22 @@ class _LanInfoPageState extends State<LanInfoPage> {
                 Text(
                   'MAC ${net['mac']}',
                   style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
+                )
+              else if (net['macHidden'] == true)
+                Text(
+                  'MAC 系统已隐藏',
+                  style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
                 ),
               Text(
                 'MTU ${net['mtu'] ?? '—'}',
                 style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
               ),
               Text(
-                '速率 ${_nicSpeed((net['speedMbps'] as num?)?.toInt() ?? 0)}',
+                '速率 ${
+                    name == NativeInfo.interfaceName
+                        ? _speed([NativeInfo.linkDownKbps, NativeInfo.linkUpKbps].reduce((a, b) => a > b ? a : b))
+                        : _nicSpeed((net['speedMbps'] as num?)?.toInt() ?? 0)
+                }',
                 style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
               ),
             ],
