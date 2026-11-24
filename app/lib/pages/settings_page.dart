@@ -895,7 +895,7 @@ class SettingsPage extends StatelessWidget {
   }
 
   void _about(BuildContext context) {
-    final version = '1.0.8';
+    final version = '1.0.9';
     showPmSheet(
       context,
       title: '关于 NetPulse',
@@ -944,6 +944,15 @@ class SettingsPage extends StatelessWidget {
                 ),
               ],
             ),
+          ),
+          const SizedBox(height: 18),
+          PmSectionTitle('开发与维护'),
+          _creditTile(
+            context,
+            'LianXia233 · 开发与维护',
+            'NetPulse 源码、构建与 CI',
+            'https://github.com/LianXia233/NetPulse',
+            Icons.person_rounded,
           ),
           const SizedBox(height: 18),
           PmSectionTitle('开源声明'),

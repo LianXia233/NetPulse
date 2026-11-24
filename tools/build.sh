@@ -24,5 +24,5 @@ cp target/armv7-linux-androideabi/release/libnetpulse_core.so "$APP/android/app/
 cd "$APP"
 env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY flutter build apk --release --target-platform android-arm64 --target-platform android-arm
 mkdir -p "$ROOT/dist"
-cp build/app/outputs/flutter-apk/app-release.apk "$ROOT/dist/NetPulse-1.0.8.apk"
-echo "APK: $ROOT/dist/NetPulse-1.0.8.apk"
+cp build/app/outputs/flutter-apk/app-release.apk "$ROOT/dist/NetPulse-1.0.9.apk"
+echo "APK: $ROOT/dist/NetPulse-1.0.9.apk"
