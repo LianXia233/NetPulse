@@ -6,6 +6,7 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../download_sheet.dart';
 import '../page_kit.dart';
+import '../store.dart';
 import '../theme.dart';
 import '../widgets.dart';
 
@@ -28,6 +29,12 @@ class _BrowserPageState extends State<BrowserPage> {
   String _title = '';
   String _url = '';
   List<Map<String, dynamic>> _links = [];
+  AppStore? _store;
+  bool _settingsApplied = false;
+
+  static const String _desktopUa =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
   static final _downloadPattern = RegExp(
     r'\.(zip|apk|apks|xapk|exe|msi|dmg|iso|img|rar|7z|tar|gz|tgz|bz2|xz|pdf|epub|mobi|mp4|mkv|avi|mov|flv|webm|mp3|flac|wav|aac|m4a|doc|docx|xls|xlsx|ppt|pptx|bin|dat|jar|aar|whl|crx|ttf|otf)(\?|#|$)',
@@ -54,7 +61,18 @@ class _BrowserPageState extends State<BrowserPage> {
               _started = true;
             });
             await _syncNav();
-            await _sniff();
+            if ((_store?.browserSniff ?? true) &&
+                (_store?.browserJavaScript ?? true)) {
+              await _sniff();
+            }
+            if (_store?.browserUaMode == 'desktop') {
+              try {
+                await _controller.runJavaScript(
+                  "const m=document.querySelector('meta[name=viewport]');"
+                  "if(m){m.setAttribute('content','width=1280');}",
+                );
+              } catch (_) {}
+            }
             await _readTitle();
           },
           onUrlChange: (change) {
@@ -74,7 +92,7 @@ class _BrowserPageState extends State<BrowserPage> {
               pmToast(context, '该链接由网页内部生成，暂不支持直接下载');
               return NavigationDecision.prevent;
             }
-            if (_looksDownload(url)) {
+            if ((_store?.browserIntercept ?? true) && _looksDownload(url)) {
               _downloadLink(url);
               return NavigationDecision.prevent;
             }
@@ -86,10 +104,54 @@ class _BrowserPageState extends State<BrowserPage> {
           },
         ),
       );
-    if (widget.initialUrl != null && widget.initialUrl!.isNotEmpty) {
-      _address.text = widget.initialUrl!;
-      WidgetsBinding.instance.addPostFrameCallback((_) => _go(widget.initialUrl!));
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _store ??= AppScope.of(context);
+    if (_settingsApplied) return;
+    _settingsApplied = true;
+    _applyBrowserSettings().then((_) {
+      if (!mounted) return;
+      final initial = widget.initialUrl?.trim() ?? '';
+      final home = _store?.browserHome.trim() ?? '';
+      if (initial.isNotEmpty) {
+        _address.text = initial;
+        _go(initial);
+      } else if (home.isNotEmpty) {
+        _go(home);
+      }
+    });
+  }
+
+  String? _resolveUserAgent(AppStore store) {
+    switch (store.browserUaMode) {
+      case 'desktop':
+        return _desktopUa;
+      case 'custom':
+        final custom = store.browserUaCustom.trim();
+        return custom.isEmpty ? null : custom;
+      default:
+        return null;
     }
+  }
+
+  Future<void> _applyBrowserSettings({bool reload = false}) async {
+    final store = _store;
+    if (store == null) return;
+    try {
+      await _controller.setJavaScriptMode(
+        store.browserJavaScript
+            ? JavaScriptMode.unrestricted
+            : JavaScriptMode.disabled,
+      );
+      await _controller.setUserAgent(_resolveUserAgent(store));
+      if (reload && _started) {
+        _controller.reload();
+        if (mounted) setState(() => _loading = true);
+      }
+    } catch (_) {}
   }
 
   @override
@@ -109,7 +171,13 @@ class _BrowserPageState extends State<BrowserPage> {
   void _go(String raw) {
     var input = raw.trim();
     if (input.isEmpty) return;
-    if (!input.contains('://')) input = 'https://$input';
+    if (!input.contains('://')) {
+      if (!input.contains('.') && !input.contains(':') && !input.contains('/')) {
+        input = 'https://www.baidu.com/s?wd=${Uri.encodeComponent(input)}';
+      } else {
+        input = 'https://$input';
+      }
+    }
     final uri = Uri.tryParse(input);
     if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) {
       pmToast(context, '请输入有效链接');
@@ -123,6 +191,182 @@ class _BrowserPageState extends State<BrowserPage> {
       _url = input;
       _address.text = input;
     });
+  }
+
+  void _goHome() {
+    final home = _store?.browserHome.trim() ?? '';
+    if (home.isEmpty) {
+      setState(() {
+        _started = false;
+        _title = '';
+        _url = '';
+        _address.clear();
+        _links = [];
+      });
+      return;
+    }
+    _go(home);
+  }
+
+  Future<void> _clearCookies() async {
+    try {
+      final cleared = await WebViewCookieManager().clearCookies();
+      await _controller.clearLocalStorage();
+      if (mounted) pmToast(context, cleared ? '已清除 Cookie 与本地存储' : '没有可清除的 Cookie');
+    } catch (e) {
+      if (mounted) pmToast(context, '清除失败：$e');
+    }
+  }
+
+  Future<void> _clearCache() async {
+    try {
+      await _controller.clearCache();
+      await _controller.clearLocalStorage();
+      if (mounted) pmToast(context, '已清除网页缓存与本地存储');
+    } catch (e) {
+      if (mounted) pmToast(context, '清除失败：$e');
+    }
+  }
+
+  void _openAdvanced() {
+    final store = _store;
+    if (store == null) return;
+    final home = TextEditingController(text: store.browserHome);
+    final ua = TextEditingController(text: store.browserUaCustom);
+    var mode = store.browserUaMode;
+    var js = store.browserJavaScript;
+    var sniff = store.browserSniff;
+    var intercept = store.browserIntercept;
+    showPmSheet(
+      context,
+      title: '浏览器高级设置',
+      body: StatefulBuilder(
+        builder: (ctx, setSheet) {
+          final pm = ctx.pm;
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                '首页留空时显示快捷入口；修改浏览器标识后会自动刷新当前页面。',
+                style: ctx.text.bodySmall?.copyWith(color: pm.muted, height: 1.45),
+              ),
+              const SizedBox(height: 12),
+              PmField(
+                controller: home,
+                label: '启动首页',
+                hint: 'https://example.com（留空显示快捷入口）',
+                maxLines: 2,
+              ),
+              const SizedBox(height: 14),
+              Text('浏览器标识', style: ctx.text.bodyMedium),
+              const SizedBox(height: 8),
+              PmSegmented<String>(
+                items: const [
+                  (value: 'system', label: '系统默认'),
+                  (value: 'desktop', label: '桌面版'),
+                  (value: 'custom', label: '自定义'),
+                ],
+                value: mode,
+                onChanged: (v) => setSheet(() => mode = v),
+              ),
+              if (mode == 'custom') ...[
+                const SizedBox(height: 10),
+                PmField(
+                  controller: ua,
+                  label: '自定义 User-Agent',
+                  hint: 'Mozilla/5.0 ...',
+                  maxLines: 2,
+                ),
+              ],
+              const SizedBox(height: 12),
+              _BrowserSwitchRow(
+                title: 'JavaScript',
+                subtitle: '关闭后网页交互和直链嗅探会失效',
+                value: js,
+                onChanged: (v) => setSheet(() => js = v),
+              ),
+              _BrowserSwitchRow(
+                title: '自动嗅探直链',
+                subtitle: '页面加载完成后收集可下载链接',
+                value: sniff,
+                onChanged: (v) => setSheet(() => sniff = v),
+              ),
+              _BrowserSwitchRow(
+                title: '拦截下载链接',
+                subtitle: '命中下载语义时直接弹出下载参数页',
+                value: intercept,
+                onChanged: (v) => setSheet(() => intercept = v),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: ShapeDecoration(
+                  color: pm.block,
+                  shape: RoundedSuperellipseBorder(
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: TextButton.icon(
+                        onPressed: _clearCookies,
+                        icon: const Icon(Icons.cookie_outlined, size: 17),
+                        label: const Text('清除 Cookie'),
+                      ),
+                    ),
+                    Expanded(
+                      child: TextButton.icon(
+                        onPressed: _clearCache,
+                        icon: const Icon(Icons.cleaning_services_outlined, size: 17),
+                        label: const Text('清除缓存'),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  TextButton(
+                    onPressed: () {
+                      home.clear();
+                      ua.clear();
+                      setSheet(() {
+                        mode = 'system';
+                        js = true;
+                        sniff = true;
+                        intercept = true;
+                      });
+                    },
+                    child: const Text('恢复默认'),
+                  ),
+                  const Spacer(),
+                  PmPrimaryButton(
+                    label: '保存并应用',
+                    icon: Icons.check_rounded,
+                    expand: false,
+                    onPressed: () {
+                      store.setBrowserSettings(
+                        home: home.text,
+                        uaMode: mode,
+                        uaCustom: ua.text,
+                        javaScript: js,
+                        sniff: sniff,
+                        intercept: intercept,
+                      );
+                      Navigator.pop(ctx);
+                      _applyBrowserSettings(reload: true);
+                      if (mounted) pmToast(context, '浏览器设置已应用');
+                    },
+                  ),
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+    );
   }
 
   Future<void> _syncNav() async {
@@ -251,45 +495,71 @@ class _BrowserPageState extends State<BrowserPage> {
   @override
   Widget build(BuildContext context) {
     final pm = context.pm;
+    final scheme = context.scheme;
     return Scaffold(
       backgroundColor: pm.page,
       body: SafeArea(
+        bottom: false,
         child: Column(
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(8, 6, kPagePadding, 6),
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
               child: Row(
                 children: [
-                  IconButton(
-                    onPressed: () => Navigator.pop(context),
-                    icon: const Icon(Icons.close_rounded, size: 20),
-                    visualDensity: VisualDensity.compact,
+                  _BrowserCircleButton(
+                    icon: Icons.close_rounded,
+                    onTap: () => Navigator.pop(context),
                   ),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: Container(
-                      height: 40,
+                      height: 46,
                       padding: const EdgeInsets.symmetric(horizontal: 12),
                       decoration: ShapeDecoration(
                         color: pm.card,
-                        shape: RoundedSuperellipseBorder(borderRadius: BorderRadius.circular(20)),
+                        shape: const StadiumBorder(),
+                        shadows: [
+                          BoxShadow(
+                            color: Colors.black.withValues(
+                              alpha: context.isDark ? 0.28 : 0.06,
+                            ),
+                            blurRadius: 16,
+                            offset: const Offset(0, 5),
+                          ),
+                        ],
                       ),
                       child: Row(
                         children: [
+                          GestureDetector(
+                            onTap: _goHome,
+                            behavior: HitTestBehavior.opaque,
+                            child: Icon(
+                              Icons.home_rounded,
+                              size: 19,
+                              color: scheme.primary,
+                            ),
+                          ),
+                          const SizedBox(width: 9),
                           Icon(
-                            _url.startsWith('https://') ? Icons.lock_rounded : Icons.language_rounded,
-                            size: 14,
+                            _url.startsWith('https://')
+                                ? Icons.lock_rounded
+                                : Icons.language_rounded,
+                            size: 13,
                             color: _url.startsWith('https://') ? pm.ok : pm.muted,
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 6),
                           Expanded(
                             child: TextField(
                               controller: _address,
-                              style: context.text.bodyMedium,
+                              style: context.text.bodyMedium?.copyWith(fontSize: 13.5),
                               textInputAction: TextInputAction.go,
+                              autocorrect: false,
+                              enableSuggestions: false,
                               decoration: InputDecoration(
                                 isDense: true,
                                 border: InputBorder.none,
-                                hintText: '输入或粘贴链接',
+                                contentPadding: EdgeInsets.zero,
+                                hintText: '输入网址或搜索内容',
                                 hintStyle: context.text.bodySmall?.copyWith(color: pm.muted),
                               ),
                               onSubmitted: _go,
@@ -298,84 +568,134 @@ class _BrowserPageState extends State<BrowserPage> {
                           if (_address.text.isNotEmpty)
                             GestureDetector(
                               onTap: () => setState(_address.clear),
-                              child: Icon(Icons.cancel_rounded, size: 15, color: pm.muted),
+                              child: Icon(
+                                Icons.cancel_rounded,
+                                size: 15,
+                                color: pm.muted,
+                              ),
                             ),
                         ],
                       ),
                     ),
                   ),
-                  const SizedBox(width: 6),
-                  PmIconAction(icon: Icons.arrow_forward_rounded, onTap: () => _go(_address.text)),
+                  const SizedBox(width: 8),
+                  _BrowserCircleButton(
+                    icon: Icons.tune_rounded,
+                    accent: true,
+                    onTap: _openAdvanced,
+                  ),
                 ],
               ),
             ),
             if (_loading)
-              LinearProgressIndicator(
-                value: _progress == 0 ? null : _progress,
-                minHeight: 2,
-                backgroundColor: pm.track,
-                valueColor: AlwaysStoppedAnimation(context.scheme.primary),
-              )
-            else
-              const SizedBox(height: 2),
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 12),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(2),
+                  child: LinearProgressIndicator(
+                    value: _progress == 0 ? null : _progress,
+                    minHeight: 3,
+                    backgroundColor: pm.track,
+                    valueColor: AlwaysStoppedAnimation(scheme.primary),
+                  ),
+                ),
+              ),
             if (_title.isNotEmpty && _started)
               Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Text(
-                  _title,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.text.bodySmall?.copyWith(color: pm.muted),
+                padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                  decoration: ShapeDecoration(
+                    color: pm.card,
+                    shape: const StadiumBorder(),
+                  ),
+                  child: Text(
+                    _title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.text.bodySmall?.copyWith(color: pm.muted),
+                  ),
                 ),
               ),
             Expanded(
-              child: _started
-                  ? WebViewWidget(controller: _controller)
-                  : _BrowserHome(onOpen: _go, onPaste: _paste),
-            ),
-            Container(
-              decoration: BoxDecoration(
-                color: pm.card,
-                border: Border(top: BorderSide(color: pm.inset, width: 0.5)),
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(12, 4, 12, 0),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(20),
+                  child: _started
+                      ? WebViewWidget(controller: _controller)
+                      : _BrowserHome(
+                          onOpen: _go,
+                          onPaste: _paste,
+                          onSettings: _openAdvanced,
+                        ),
+                ),
               ),
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  _NavButton(
-                    icon: Icons.arrow_back_rounded,
-                    label: '后退',
-                    onTap: () async {
-                      if (await _controller.canGoBack()) {
-                        await _controller.goBack();
-                        await _syncNav();
-                      }
-                    },
-                  ),
-                  _NavButton(
-                    icon: Icons.arrow_forward_rounded,
-                    label: '前进',
-                    onTap: () async {
-                      if (await _controller.canGoForward()) {
-                        await _controller.goForward();
-                        await _syncNav();
-                      }
-                    },
-                  ),
-                  _NavButton(
-                    icon: Icons.refresh_rounded,
-                    label: '刷新',
-                    onTap: () {
-                      _controller.reload();
-                      setState(() => _loading = true);
-                    },
-                  ),
-                  _NavButton(
-                    icon: Icons.link_rounded,
-                    label: '链接${_links.isEmpty ? '' : ' ${_links.length}'}',
-                    onTap: _showLinks,
-                  ),
-                ],
+            ),
+            SafeArea(
+              top: false,
+              minimum: const EdgeInsets.fromLTRB(21, 6, 21, 8),
+              child: Container(
+                height: 60,
+                decoration: ShapeDecoration(
+                  color: pm.card,
+                  shape: const StadiumBorder(),
+                  shadows: [
+                    BoxShadow(
+                      color: Colors.black.withValues(
+                        alpha: context.isDark ? 0.38 : 0.09,
+                      ),
+                      blurRadius: 22,
+                      offset: const Offset(0, 7),
+                    ),
+                  ],
+                ),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: _NavButton(
+                        icon: Icons.arrow_back_rounded,
+                        label: '后退',
+                        onTap: () async {
+                          if (await _controller.canGoBack()) {
+                            await _controller.goBack();
+                            await _syncNav();
+                          }
+                        },
+                      ),
+                    ),
+                    Expanded(
+                      child: _NavButton(
+                        icon: Icons.arrow_forward_rounded,
+                        label: '前进',
+                        onTap: () async {
+                          if (await _controller.canGoForward()) {
+                            await _controller.goForward();
+                            await _syncNav();
+                          }
+                        },
+                      ),
+                    ),
+                    Expanded(
+                      child: _NavButton(
+                        icon: Icons.refresh_rounded,
+                        label: '刷新',
+                        onTap: () {
+                          _controller.reload();
+                          setState(() => _loading = true);
+                        },
+                      ),
+                    ),
+                    Expanded(
+                      child: _NavButton(
+                        icon: Icons.link_rounded,
+                        label: '链接${_links.isEmpty ? '' : ' ${_links.length}'}',
+                        accent: _links.isNotEmpty,
+                        onTap: _showLinks,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
           ],
@@ -398,10 +718,15 @@ class _BrowserPageState extends State<BrowserPage> {
 }
 
 class _BrowserHome extends StatelessWidget {
-  const _BrowserHome({required this.onOpen, required this.onPaste});
+  const _BrowserHome({
+    required this.onOpen,
+    required this.onPaste,
+    required this.onSettings,
+  });
 
   final void Function(String url) onOpen;
   final VoidCallback onPaste;
+  final VoidCallback onSettings;
 
   static const _quick = [
     ('常用下载站', 'https://www.coolapk.com/apk', Icons.android_rounded),
@@ -450,6 +775,15 @@ class _BrowserHome extends StatelessWidget {
                       onPressed: onPaste,
                     ),
                   ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: PmPrimaryButton(
+                      label: '浏览器设置',
+                      icon: Icons.tune_rounded,
+                      expand: true,
+                      onPressed: onSettings,
+                    ),
+                  ),
                 ],
               ),
             ],
@@ -488,27 +822,128 @@ class _BrowserHome extends StatelessWidget {
 }
 
 class _NavButton extends StatelessWidget {
-  const _NavButton({required this.icon, required this.label, required this.onTap});
+  const _NavButton({
+    required this.icon,
+    required this.label,
+    required this.onTap,
+    this.accent = false,
+  });
 
   final IconData icon;
   final String label;
   final VoidCallback onTap;
+  final bool accent;
+
   @override
   Widget build(BuildContext context) {
     final pm = context.pm;
+    final color = accent ? context.scheme.primary : pm.muted;
     return InkWell(
       onTap: onTap,
-      borderRadius: BorderRadius.circular(10),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 21, color: pm.muted),
-            const SizedBox(height: 2),
-            Text(label, style: TextStyle(fontSize: 11.5, color: pm.muted, fontWeight: FontWeight.w500)),
+      splashFactory: NoSplash.splashFactory,
+      borderRadius: BorderRadius.circular(30),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 22, color: color),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            maxLines: 1,
+            style: TextStyle(
+              fontSize: 10.5,
+              color: color,
+              fontWeight: accent ? FontWeight.w600 : FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BrowserCircleButton extends StatelessWidget {
+  const _BrowserCircleButton({
+    required this.icon,
+    required this.onTap,
+    this.accent = false,
+  });
+
+  final IconData icon;
+  final VoidCallback onTap;
+  final bool accent;
+
+  @override
+  Widget build(BuildContext context) {
+    final pm = context.pm;
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Container(
+        width: 42,
+        height: 42,
+        decoration: ShapeDecoration(
+          color: pm.card,
+          shape: const StadiumBorder(),
+          shadows: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: context.isDark ? 0.28 : 0.06),
+              blurRadius: 14,
+              offset: const Offset(0, 4),
+            ),
           ],
         ),
+        child: Icon(
+          icon,
+          size: 20,
+          color: accent ? context.scheme.primary : context.scheme.onSurface,
+        ),
+      ),
+    );
+  }
+}
+
+class _BrowserSwitchRow extends StatelessWidget {
+  const _BrowserSwitchRow({
+    required this.title,
+    required this.subtitle,
+    required this.value,
+    required this.onChanged,
+  });
+
+  final String title;
+  final String subtitle;
+  final bool value;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final pm = context.pm;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(title, style: context.text.bodyMedium),
+                Text(
+                  subtitle,
+                  style: context.text.bodySmall?.copyWith(
+                    color: pm.muted,
+                    fontSize: 11,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Switch(
+            value: value,
+            activeTrackColor: context.scheme.primary,
+            onChanged: onChanged,
+          ),
+        ],
       ),
     );
   }

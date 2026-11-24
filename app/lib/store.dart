@@ -45,7 +45,7 @@ class HistoryRecord {
 }
 
 const String kDefaultDownloadDir = '/storage/emulated/0/Download/NetPulse';
-const String kAppVersion = '1.1.2';
+const String kAppVersion = '1.1.3';
 
 class AppStore extends ChangeNotifier {
   ThemeMode themeMode = ThemeMode.system;
@@ -103,6 +103,13 @@ class AppStore extends ChangeNotifier {
   String speedDnsMode = 'all';
   String ipdbUrl = '';
   String ipApiEndpoint = 'https://ipwho.is/{ip}';
+  // 内置浏览器
+  String browserHome = '';
+  String browserUaMode = 'system'; // system / desktop / custom
+  String browserUaCustom = '';
+  bool browserJavaScript = true;
+  bool browserSniff = true;
+  bool browserIntercept = true;
   String get downloadDirEffective =>
       downloadDir.trim().isEmpty ? kDefaultDownloadDir : downloadDir.trim();
   List<HistoryRecord> history = [];
@@ -161,6 +168,12 @@ class AppStore extends ChangeNotifier {
         speedDnsMode = j['speedDnsMode']?.toString() ?? speedDnsMode;
         ipdbUrl = j['ipdbUrl']?.toString() ?? ipdbUrl;
         ipApiEndpoint = j['ipApiEndpoint']?.toString() ?? ipApiEndpoint;
+        browserHome = j['browserHome']?.toString() ?? browserHome;
+        browserUaMode = j['browserUaMode']?.toString() ?? browserUaMode;
+        browserUaCustom = j['browserUaCustom']?.toString() ?? browserUaCustom;
+        browserJavaScript = j['browserJavaScript'] != false;
+        browserSniff = j['browserSniff'] != false;
+        browserIntercept = j['browserIntercept'] != false;
         // 旧版本默认使用明文 ip-api，升级后迁移到 HTTPS 源。
         if (ipApiEndpoint.contains('ip-api.com')) {
           ipApiEndpoint = 'https://ipwho.is/{ip}';
@@ -212,6 +225,12 @@ class AppStore extends ChangeNotifier {
       'speedDnsMode': speedDnsMode,
       'ipdbUrl': ipdbUrl,
       'ipApiEndpoint': ipApiEndpoint,
+      'browserHome': browserHome,
+      'browserUaMode': browserUaMode,
+      'browserUaCustom': browserUaCustom,
+      'browserJavaScript': browserJavaScript,
+      'browserSniff': browserSniff,
+      'browserIntercept': browserIntercept,
       'history': history.map((e) => e.toJson()).toList(),
       'downloadRecords': downloadRecords,
     };
@@ -360,6 +379,24 @@ class AppStore extends ChangeNotifier {
 
   void setIpApiEndpoint(String value) {
     ipApiEndpoint = value.trim();
+    save();
+    notifyListeners();
+  }
+
+  void setBrowserSettings({
+    String? home,
+    String? uaMode,
+    String? uaCustom,
+    bool? javaScript,
+    bool? sniff,
+    bool? intercept,
+  }) {
+    if (home != null) browserHome = home.trim();
+    if (uaMode != null) browserUaMode = uaMode;
+    if (uaCustom != null) browserUaCustom = uaCustom.trim();
+    if (javaScript != null) browserJavaScript = javaScript;
+    if (sniff != null) browserSniff = sniff;
+    if (intercept != null) browserIntercept = intercept;
     save();
     notifyListeners();
   }
