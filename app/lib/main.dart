@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'bridge.dart';
 import 'download_sheet.dart';
+import 'floating_nav.dart';
 import 'pages/dashboard.dart';
 import 'pages/downloads_page.dart';
 import 'pages/settings_page.dart';
@@ -43,6 +44,8 @@ class PmApp extends StatelessWidget {
           title: 'NetPulse',
           debugShowCheckedModeBanner: false,
           themeMode: store.themeMode,
+          themeAnimationDuration: const Duration(milliseconds: 320),
+          themeAnimationCurve: Curves.easeOutCubic,
           theme: buildPmTheme(
             brightness: Brightness.light,
             seed: store.seed,
@@ -90,12 +93,11 @@ class _HomeShellState extends State<HomeShell> {
     showDownloadSheet(context, initialUrl: link);
   }
 
-  static const _tabs = [
-    (icon: Icons.dashboard_rounded, label: '概览'),
-    (icon: Icons.speed_rounded, label: '测速'),
-    (icon: Icons.tune_rounded, label: '工具'),
-    (icon: Icons.download_rounded, label: '下载'),
-    (icon: Icons.settings_rounded, label: '设置'),
+  static const _navItems = [
+    (item: NavDockItem(icon: Icons.grid_view_rounded, label: '仪表盘'), page: 0),
+    (item: NavDockItem(icon: Icons.speed_rounded, label: '测速'), page: 1),
+    (item: NavDockItem(icon: Icons.download_rounded, label: '下载'), page: 3),
+    (item: NavDockItem(icon: Icons.handyman_rounded, label: '工具'), page: 2),
   ];
 
   @override
@@ -135,27 +137,13 @@ class _HomeShellState extends State<HomeShell> {
             SettingsPage(),
           ],
         ),
-        bottomNavigationBar: Container(
-          decoration: BoxDecoration(
-            color: pm.card,
-            border: Border(
-              top: BorderSide(color: pm.inset.withValues(alpha: 0.6)),
-            ),
-          ),
-          child: SafeArea(
-            top: false,
-            child: NavigationBar(
-              selectedIndex: _index,
-              onDestinationSelected: _go,
-              destinations: [
-                for (final tab in _tabs)
-                  NavigationDestination(
-                    icon: Icon(tab.icon),
-                    selectedIcon: Icon(tab.icon),
-                    label: tab.label,
-                  ),
-              ],
-            ),
+        bottomNavigationBar: SafeArea(
+          top: false,
+          minimum: const EdgeInsets.fromLTRB(21, 0, 21, 8),
+          child: FloatingNavDock(
+            items: [for (final tab in _navItems) tab.item],
+            selectedIndex: _navItems.indexWhere((tab) => tab.page == _index),
+            onSelected: (i) => _go(_navItems[i].page),
           ),
         ),
       ),

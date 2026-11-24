@@ -28,7 +28,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 400));
     expect(tester.takeException(), isNull, reason: '概览首屏');
 
-    for (final label in ['测速', '工具', '下载', '设置', '概览']) {
+    for (final label in ['测速', '下载', '工具', '仪表盘']) {
       await tester.tap(find.text(label).last);
       await tester.pump(const Duration(milliseconds: 500));
       expect(tester.takeException(), isNull, reason: label);

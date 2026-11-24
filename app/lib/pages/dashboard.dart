@@ -48,6 +48,10 @@ class _DashboardPageState extends State<DashboardPage> {
               subtitle: '当前出口 IP · 归属地 · 纯净度 · 多 CDN / 多 DNS 下载',
               actions: [
                 PmIconAction(
+                  icon: Icons.settings_rounded,
+                  onTap: () => HomeNavScope.jump(context, 4),
+                ),
+                PmIconAction(
                   icon: store.themeMode == ThemeMode.dark
                       ? Icons.dark_mode_rounded
                       : store.themeMode == ThemeMode.light

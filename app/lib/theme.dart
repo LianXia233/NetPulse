@@ -13,8 +13,8 @@ const List<Color> kAccentPalette = [
   Color(0xFF8E8E93),
 ];
 
-const double kCardRadius = 22;
-const double kSheetRadius = 30;
+const double kCardRadius = 20;
+const double kSheetRadius = 28;
 const double kPagePadding = 18;
 const Duration kFast = Duration(milliseconds: 160);
 const Duration kMid = Duration(milliseconds: 280);
@@ -146,21 +146,25 @@ ThemeData buildPmTheme({
   required bool pureBlack,
 }) {
   final isDark = brightness == Brightness.dark;
+  // FlClash 的 vivid 方案保留种子色的高饱和主色，而不是 Material 默认压暗后的色值。
+  final accent = isDark
+      ? Color.alphaBlend(Colors.white.withValues(alpha: 0.22), seed)
+      : seed;
   final scheme = ColorScheme.fromSeed(
     seedColor: seed,
     brightness: brightness,
     dynamicSchemeVariant: DynamicSchemeVariant.fidelity,
-  );
+  ).copyWith(primary: accent, onPrimary: Colors.white);
   final page = isDark
       ? (pureBlack ? const Color(0xFF000000) : const Color(0xFF0B0B0E))
-      : const Color(0xFFF2F2F7);
+      : const Color(0xFFF2F3F5);
   final card = isDark
-      ? (pureBlack ? const Color(0xFF080808) : const Color(0xFF151518))
+      ? (pureBlack ? const Color(0xFF080808) : const Color(0xFF16171B))
       : Colors.white;
-  final block = isDark ? const Color(0xFF202026) : const Color(0xFFECECF1);
-  final inset = isDark ? const Color(0xFF2A2A31) : const Color(0xFFE2E2E9);
-  final track = isDark ? const Color(0xFF34343D) : const Color(0xFFD8D8E1);
-  final muted = isDark ? const Color(0xFF9898A6) : const Color(0xFF6C6C78);
+  final block = isDark ? const Color(0xFF23242A) : const Color(0xFFE9EAEE);
+  final inset = isDark ? const Color(0xFF2D2E35) : const Color(0xFFE1E2E7);
+  final track = isDark ? const Color(0xFF383941) : const Color(0xFFD7D9DF);
+  final muted = isDark ? const Color(0xFF9A9BA3) : const Color(0xFF6B6D76);
   final series2 = Color.alphaBlend(scheme.primary.withValues(alpha: 0.48), card);
   final colors = PmColors(
     page: page,
