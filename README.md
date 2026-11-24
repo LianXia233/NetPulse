@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://github.com/LianXia233/NetPulse/actions/workflows/android.yml"><img src="https://github.com/LianXia233/NetPulse/actions/workflows/android.yml/badge.svg?branch=main" alt="Android CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-yellow?style=flat-square" alt="License: MIT"></a>
-  <img src="https://img.shields.io/badge/version-1.0.9-blue?style=flat-square" alt="Version 1.0.9">
+  <a href="https://github.com/LianXia233/NetPulse/releases"><img src="https://img.shields.io/github/v/release/LianXia233/NetPulse?style=flat-square&label=release" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/Android-7.0%2B-3DDC84?style=flat-square&logo=android&logoColor=white" alt="Android 7.0+">
   <img src="https://img.shields.io/badge/Flutter-3.50.1-02569B?style=flat-square&logo=flutter&logoColor=white" alt="Flutter 3.50.1">
   <img src="https://img.shields.io/badge/Rust-stable-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust stable">
@@ -31,6 +31,10 @@
 | 📡 局域网 | 展示 IPv4 / IPv6、子网掩码、网关、MAC、MTU、链路速率、DNS 与全部网卡。 |
 | 🗺️ IP 归属地 | 内置约 43 万条 IPv4 国家/地区段；支持 CSV / CSV.GZ 更新；可配置 IP API，显示国家、地区、城市、ISP、ASN、坐标与时区。 |
 | 🎨 界面 | FlClash 风格超椭圆卡片、渐变表盘、平滑面积图、药丸分段控件；浅色 / 深色 / 纯黑与八色主题。 |
+
+## 下载
+
+正式版 APK 发布在 [GitHub Releases](https://github.com/LianXia233/NetPulse/releases)。CI 会根据 `app/pubspec.yaml` 的版本号创建或更新对应 `vX.Y.Z` 的正式 Release（非 draft / prerelease），并附带 APK 与 SHA-256 校验文件。
 
 ## 下载参数
 
@@ -94,11 +98,12 @@ bash tools/build.sh
 
 ### CI 云编译
 
-[`.github/workflows/android.yml`](.github/workflows/android.yml) 在推送到 `main`、推送 `v*` 标签或手动触发时执行：
+[`.github/workflows/android.yml`](.github/workflows/android.yml) 在推送到 `main` 或手动触发时执行：
 
 - 安装 Flutter 3.50.1、JDK 17、Android SDK 36、NDK 27.3 与 Rust Android targets；
 - 从 GitHub Actions Secrets 还原 release keystore，构建并签名 APK；
-- 用 `apksigner` 校验发布证书 SHA-256，校验通过后才上传 `NetPulse-APK-*` Artifact。
+- 用 `apksigner` 校验发布证书 SHA-256，校验通过后才上传 `NetPulse-APK-*` Artifact；
+- 从 `app/pubspec.yaml` 读取当前版本，自动创建或更新 `vX.Y.Z` 正式 Release，上传 APK 与 SHA-256 校验文件。
 
 仓库不包含 keystore 和 `key.properties`。本地没有签名材料时，Gradle 会回退到 debug 签名；CI 缺少签名 Secret 时会直接失败，不会用 debug 包冒充发布包。
 

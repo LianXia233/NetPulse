@@ -3,7 +3,6 @@ name: Android CI
 on:
   push:
     branches: [main]
-    tags: ['v*']
   workflow_dispatch:
 
 permissions:
@@ -18,10 +17,28 @@ jobs:
     name: Build signed APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      version_code: ${{ steps.meta.outputs.version_code }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Read version from pubspec
+        id: meta
+        run: |
+          set -euo pipefail
+          RAW=$(sed -n 's/^version:\s*//p' app/pubspec.yaml | head -1 | tr -d '\r')
+          VERSION="${RAW%%+*}"
+          VERSION_CODE="${RAW#*+}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::无法从 app/pubspec.yaml 读取版本号"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
+          echo "版本: $VERSION (versionCode $VERSION_CODE)"
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -124,3 +141,58 @@ jobs:
             dist/SHA256.txt
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: NetPulse-APK-${{ github.run_number }}
+          path: release
+
+      - name: Publish official release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.build.outputs.version }}
+          VERSION_CODE: ${{ needs.build.outputs.version_code }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          APK="$(ls -1 release/*.apk | head -1)"
+          APK_SHA="$(cut -d' ' -f1 release/SHA256.txt)"
+          CERT_SHA="118ea38fc17a465dce8fe2c7657d0b4d3c7273e6379f3a0a9b73f5f80a106d6b"
+          echo "$APK_SHA  $APK" | sha256sum -c -
+          SHA_FILE="release/NetPulse-${VERSION}.sha256"
+          mv release/SHA256.txt "$SHA_FILE"
+
+          NOTES=$(cat <<EOF
+          NetPulse ${VERSION} 正式版
+
+          - 版本：${VERSION}（versionCode ${VERSION_CODE}）
+          - 构建提交：${GITHUB_SHA}
+          - APK SHA-256：${APK_SHA}
+          - 签名证书 SHA-256：${CERT_SHA}
+
+          安装包与 SHA-256 校验文件已附在本 Release。
+          EOF
+          )
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release edit "$TAG" --title "NetPulse ${VERSION}" --notes "$NOTES" --draft=false --prerelease=false
+            gh release upload "$TAG" "$APK" "$SHA_FILE" --clobber
+          else
+            gh release create "$TAG" "$APK" "$SHA_FILE" \
+              --target "$GITHUB_SHA" \
+              --title "NetPulse ${VERSION}" \
+              --notes "$NOTES" \
+              --draft=false \
+              --prerelease=false
+          fi
