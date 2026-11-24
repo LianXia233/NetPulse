@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:ui' show FontFeature;
 import 'package:flutter/material.dart';
 import '../bridge.dart';
 import '../ip_geo_widgets.dart';
@@ -873,8 +872,12 @@ class _IperfPanelState extends State<IperfPanel> {
 
   void _start() {
     final bin = NativeInfo.iperfPath;
-    if (bin.isEmpty) {
+    if (bin.isEmpty || !NativeInfo.iperfAvailable) {
       pmToast(context, '未找到内置 iperf3 可执行文件');
+      return;
+    }
+    if (NativeInfo.sdkInt != 0 && NativeInfo.sdkInt < 28) {
+      pmToast(context, '内置 iperf3 需要 Android 9（API 28）及以上');
       return;
     }
     final args = _role == 'server'
@@ -890,6 +893,8 @@ class _IperfPanelState extends State<IperfPanel> {
             _duration.text.trim().isEmpty ? '10' : _duration.text.trim(),
           ];
     _lines.clear();
+    _task?.removeListener(_onTask);
+    _task?.dispose();
     final task = CoreTask.start('iperf', {
       'bin': bin,
       'args': args,

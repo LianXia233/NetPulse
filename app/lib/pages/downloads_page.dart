@@ -1,6 +1,5 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:ui' show FontFeature;
 import 'package:flutter/material.dart';
 import '../bridge.dart';
 import '../download_sheet.dart';
@@ -205,7 +204,19 @@ class _DownloadsPageState extends State<DownloadsPage> {
         final oldId = item['id']?.toString() ?? '';
         if (oldId.isNotEmpty) {
           Core.i.cancel(oldId);
-          await Future<void>.delayed(const Duration(milliseconds: 260));
+          // 等待旧任务真正停下来，避免旧线程和新任务同时写同一组临时文件。
+          for (var i = 0; i < 100; i++) {
+            await Future<void>.delayed(const Duration(milliseconds: 200));
+            final d = await Core.callAsync('dl_detail', {'id': oldId});
+            final status = (d['data'] as Map?)?['status']?.toString() ?? '';
+            if (d['ok'] != true ||
+                status == 'paused' ||
+                status == 'error' ||
+                status == 'done' ||
+                status == 'cancelled') {
+              break;
+            }
+          }
           try {
             Core.i.call('dl_delete', {'id': oldId, 'delete_files': false});
             Core.i.dispose(oldId);
@@ -271,13 +282,20 @@ class _DownloadsPageState extends State<DownloadsPage> {
         Core.i.call('dl_delete', {'id': item['id'], 'delete_files': true});
         Core.i.dispose(item['id']?.toString() ?? '');
       } catch (_) {}
-    } else if (dir.isNotEmpty && name.isNotEmpty) {
-      try {
-        await File('$dir/.$name.pmdown').delete();
-      } catch (_) {}
-      try {
-        await File('$dir/.$name.pmdown.json').delete();
-      } catch (_) {}
+    } else {
+      final dataFile = item['data_file']?.toString() ?? '';
+      final metaFile = item['meta_file']?.toString() ?? '';
+      final candidates = <String>[
+        if (dataFile.isNotEmpty) dataFile,
+        if (metaFile.isNotEmpty) metaFile,
+        if (dir.isNotEmpty && name.isNotEmpty) '$dir/.$name.pmdown',
+        if (dir.isNotEmpty && name.isNotEmpty) '$dir/.$name.pmdown.json',
+      ];
+      for (final path in candidates) {
+        try {
+          await File(path).delete();
+        } catch (_) {}
+      }
     }
     store.removeDownloadRecord(AppStore.downloadRecordKey(item));
     _scanDone = false;
@@ -504,7 +522,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          '文件保存在 ${AppScope.of(context).downloadDirEffective}；鉴权头与镜像会写入续传元数据，暂停后可原样恢复。',
+                          '文件保存在 ${AppScope.of(context).downloadDirEffective}；镜像/DNS/分块参数会写入续传元数据，鉴权头仅保留在本机私有记录。',
                           style: context.text.bodySmall?.copyWith(color: pm.muted, height: 1.5),
                         ),
                       ),

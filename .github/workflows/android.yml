@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      force_release:
+        description: 即使同版本 Release 已存在也重新发布
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -13,8 +18,56 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  verify:
+    name: Analyze and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Flutter 3.50.1
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          channel: stable
+          flutter-version: '3.50.1'
+          cache: true
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+        with:
+          components: clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: core
+
+      - name: Flutter dependencies
+        run: |
+          cd app
+          flutter pub get
+
+      - name: Flutter analyze
+        run: |
+          cd app
+          flutter analyze --no-fatal-infos
+
+      - name: Flutter tests
+        run: |
+          cd app
+          flutter test
+
+      - name: Rust tests
+        run: cargo test --manifest-path core/Cargo.toml
+
+      - name: Rust clippy
+        run: cargo clippy --manifest-path core/Cargo.toml --all-targets -- -D warnings
+
   build:
     name: Build signed APK
+    needs: verify
     runs-on: ubuntu-latest
     timeout-minutes: 45
     outputs:
@@ -23,7 +76,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Read version from pubspec
         id: meta
@@ -36,12 +89,16 @@ jobs:
             echo "::error::无法从 app/pubspec.yaml 读取版本号"
             exit 1
           fi
+          if ! [[ "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
+            echo "::error::pubspec.yaml 版本号缺少 +versionCode"
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "version_code=$VERSION_CODE" >> "$GITHUB_OUTPUT"
           echo "版本: $VERSION (versionCode $VERSION_CODE)"
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: '17'
@@ -71,22 +128,22 @@ jobs:
         run: |
           set -euo pipefail
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;27.3.13750724" >/dev/null
+          sdkmanager --install "platforms;android-36" "build-tools;36.0.0" "ndk;28.2.13676358" >/dev/null
 
       - name: Set up Flutter 3.50.1
-        uses: subosito/flutter-action@v2
+        uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
         with:
           channel: stable
           flutter-version: '3.50.1'
           cache: true
 
       - name: Set up Rust Android targets
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
         with:
           targets: aarch64-linux-android,armv7-linux-androideabi
 
       - name: Cache Rust build
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: core
 
@@ -133,7 +190,7 @@ jobs:
           sha256sum "$APK" | tee dist/SHA256.txt
 
       - name: Upload APK
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: NetPulse-APK-${{ github.run_number }}
           path: |
@@ -152,7 +209,7 @@ jobs:
 
     steps:
       - name: Download APK artifact
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: NetPulse-APK-${{ github.run_number }}
           path: release
@@ -163,9 +220,19 @@ jobs:
           GH_REPO: ${{ github.repository }}
           VERSION: ${{ needs.build.outputs.version }}
           VERSION_CODE: ${{ needs.build.outputs.version_code }}
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE_RELEASE: ${{ inputs.force_release }}
         run: |
           set -euo pipefail
           TAG="v${VERSION}"
+          # push 构建如果同版本 Release 已存在就跳过，避免每次提交覆盖已发布资产
+          # （会导致旧 APK 的 SHA256 立即失效、tag 仍指向旧提交）。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            if [ "$EVENT_NAME" != "workflow_dispatch" ] || [ "$FORCE_RELEASE" != "true" ]; then
+              echo "Release $TAG 已存在，跳过重复发布（需要覆盖请手动运行并勾选 force_release）"
+              exit 0
+            fi
+          fi
           APK="$(ls -1 release/*.apk | head -1)"
           APK_SHA="$(cut -d' ' -f1 release/SHA256.txt)"
           CERT_SHA="118ea38fc17a465dce8fe2c7657d0b4d3c7273e6379f3a0a9b73f5f80a106d6b"

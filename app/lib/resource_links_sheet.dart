@@ -18,7 +18,11 @@ Future<void> showResourceLinksSheet(
   required Map<String, String> headers,
 }) async {
   final store = AppScope.of(context);
-  final r = Core.i.call('resource_links', {'url': sourceUrl});
+  // 网络请求放到后台 isolate，避免解析 12 秒超时期间冻结 UI。
+  final r = await Core.callAsync('resource_links', {
+    'url': sourceUrl,
+    'headers': headers,
+  });
   if (r['ok'] != true) {
     if (context.mounted) pmToast(context, r['error']?.toString() ?? '资源解析失败');
     return;

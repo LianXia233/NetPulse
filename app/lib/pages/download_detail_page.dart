@@ -299,7 +299,13 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
                   icon: Icons.play_arrow_rounded,
                   onPressed: () async {
                     final id = await widget.onResume!();
-                    if (id != null && context.mounted) Navigator.of(context).pop();
+                    if (id != null && context.mounted) {
+                      Navigator.of(context).pushReplacement(
+                        MaterialPageRoute(
+                          builder: (_) => DownloadDetailPage(id: id, name: widget.name),
+                        ),
+                      );
+                    }
                   },
                 ),
               ],
@@ -448,7 +454,7 @@ class _ChunkGrid extends StatelessWidget {
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
-        final cols = ((width + _gap) / (_cellW + _gap)).floor().clamp(1, chunks.length == 0 ? 1 : chunks.length);
+        final cols = ((width + _gap) / (_cellW + _gap)).floor().clamp(1, chunks.isEmpty ? 1 : chunks.length);
         final rows = (chunks.length + cols - 1) ~/ cols;
         final height = rows <= 0 ? 0.0 : rows * _cellH + (rows - 1) * _gap;
         return GestureDetector(
@@ -482,7 +488,7 @@ class _ChunkGridPainter extends CustomPainter {
     const w = _ChunkGrid._cellW;
     const h = _ChunkGrid._cellH;
     const gap = _ChunkGrid._gap;
-    final cols = ((size.width + gap) / (w + gap)).floor().clamp(1, chunks.length == 0 ? 1 : chunks.length);
+    final cols = ((size.width + gap) / (w + gap)).floor().clamp(1, chunks.isEmpty ? 1 : chunks.length);
     final paint = Paint()..style = PaintingStyle.fill;
     for (var i = 0; i < chunks.length; i++) {
       final row = i ~/ cols;

@@ -24,8 +24,8 @@
 
 | 模块 | 能力 |
 |---|---|
-| ⚡ 测速 | 下载 / 上传测速；多 CDN 轮询、多 DNS 并发解析、多线程连接；随机 Range 绕过缓存；250 ms 采样，输出稳态与峰值。 |
-| ⬇️ 下载 | 动态分块队列、1–32 并发连接、64 KB–8 MB 分块；多 CDN 镜像接管、请求头完整透传、断点续传、失败重试；HLS / DASH 基础支持。 |
+| ⚡ 测速 | 下载 / 上传测速；多 CDN 轮询、多 DNS 并发解析、多线程连接；随机 Range 绕过缓存；采样间隔可调（默认 1 s，100 ms–2 s），输出稳态与峰值。 |
+| ⬇️ 下载 | 动态分块队列、1–32 并发连接、64 KB–8 MB 分块；多 CDN 镜像接管、请求头去重透传、断点续传、失败重试、分段完整性校验；HLS / DASH 基础支持。 |
 | 🌐 浏览器 | 系统 WebView 打开网页，嗅探页面直链；把 Cookie、UA、Referer 与鉴权参数带入下载器；支持系统分享和外部链接唤起。 |
 | 🩺 诊断 | TCP Ping、DNS A/AAAA 多服务器对照、STUN NAT 检测、UDP 路由追踪、内置 iperf3。 |
 | 📡 局域网 | 展示 IPv4 / IPv6、子网掩码、网关、MAC、MTU、链路速率、DNS 与全部网卡。 |
@@ -34,7 +34,7 @@
 
 ## 下载
 
-正式版 APK 发布在 [GitHub Releases](https://github.com/LianXia233/NetPulse/releases)。CI 会根据 `app/pubspec.yaml` 的版本号创建或更新对应 `vX.Y.Z` 的正式 Release（非 draft / prerelease），并附带 APK 与 SHA-256 校验文件。
+正式版 APK 发布在 [GitHub Releases](https://github.com/LianXia233/NetPulse/releases)。CI 会根据 `app/pubspec.yaml` 的版本号创建对应 `vX.Y.Z` 的正式 Release（非 draft / prerelease），并附带 APK 与 SHA-256 校验文件。同版本 Release 已存在时，普通 push 不会覆盖资产；如需重发，手动触发 workflow 并勾选 `force_release`。
 
 ## 下载参数
 
@@ -50,7 +50,7 @@
 | `block_kb` | 分块大小 64 KB–8 MB |
 | `retries` | 单分块失败重试次数 0–10 |
 
-这些参数会写入续传元数据，暂停后恢复时原样复用。默认保存目录为 `/storage/emulated/0/Download/NetPulse`，也可以在设置或单次下载时修改。
+URL、文件大小、分块边界、镜像、DNS、并发/分块/重试与 ETag 会写入续传元数据；Cookie、Authorization 等鉴权头只保存在应用私有设置中，不写入公开下载目录，恢复时由应用侧补回。默认保存目录为 `/storage/emulated/0/Download/NetPulse`；Android 11+ 需要“所有文件访问权限”，Android 7–10 无法写公共目录时会自动退回应用专属目录。
 
 ## 架构
 
@@ -82,7 +82,7 @@ Flutter 通过 `dart:ffi` 调用 `libnetpulse_core.so` 的 `np_call`，请求与
 | JDK | 17 |
 | Android SDK | compileSdk 36，minSdk 24 |
 | Build Tools | 36.0.0 |
-| NDK | 27.3.13750724 |
+| NDK | 28.2.13676358 |
 | Rust | stable，`aarch64-linux-android` + `armv7-linux-androideabi` |
 
 ### 本地构建
@@ -94,16 +94,17 @@ export ANDROID_HOME=/path/to/android-sdk
 bash tools/build.sh
 ```
 
-脚本会先交叉编译 Rust 核心，再构建 arm64-v8a / armeabi-v7a 双架构 APK，输出到 `dist/NetPulse-1.0.9.apk`。若 `ANDROID_HOME` 未设置，脚本会尝试 `$HOME/toolchain/android/sdk`。
+脚本会先交叉编译 Rust 核心，再构建 arm64-v8a / armeabi-v7a 双架构 APK，输出到 `dist/NetPulse-<pubspec 版本>.apk`。脚本支持 Linux / macOS / WSL；若 `ANDROID_HOME` 未设置，会尝试 `$HOME/toolchain/android/sdk`。
 
 ### CI 云编译
 
 [`.github/workflows/android.yml`](.github/workflows/android.yml) 在推送到 `main` 或手动触发时执行：
 
-- 安装 Flutter 3.50.1、JDK 17、Android SDK 36、NDK 27.3 与 Rust Android targets；
+- 安装 Flutter 3.50.1、JDK 17、Android SDK 36、NDK 28.2 与 Rust Android targets；
 - 从 GitHub Actions Secrets 还原 release keystore，构建并签名 APK；
 - 用 `apksigner` 校验发布证书 SHA-256，校验通过后才上传 `NetPulse-APK-*` Artifact；
-- 从 `app/pubspec.yaml` 读取当前版本，自动创建或更新 `vX.Y.Z` 正式 Release，上传 APK 与 SHA-256 校验文件。
+- 先运行 Flutter analyze/test、Rust test/clippy 作为发布门禁；
+- 从 `app/pubspec.yaml` 读取当前版本，版本变化时创建 `vX.Y.Z` 正式 Release，上传 APK 与 SHA-256 校验文件；同版本已发布时默认跳过覆盖。
 
 仓库不包含 keystore 和 `key.properties`。本地没有签名材料时，Gradle 会回退到 debug 签名；CI 缺少签名 Secret 时会直接失败，不会用 debug 包冒充发布包。
 
@@ -137,8 +138,10 @@ SHA-1    5b9dae93c7ec8bb6e2fc996196666548120782cc
 ## 已知限制
 
 - 仅发布 Android 7.0+ 的 arm64-v8a / armeabi-v7a 版本，不含 x86 模拟器包。
-- HLS 目前支持 AES-128；DASH 暂不支持多音轨、DRM 与 `$Time$` 模板。
-- 进程被系统杀死后不会自动后台续跑。任务记录会保留，可在下载页或详情页手动“继续”；HLS / DASH 继续时会重新解析清单。
+- Android 7–10 写公共 Download 目录受系统限制；App 会自动退回 `Android/data/com.netpulse.app/files/Download/NetPulse`。内置 iperf3 需要 Android 9（API 28）及以上。
+- HLS 目前支持 AES-128；DASH 暂不支持多音轨、DRM 与 `$Time$` 模板（遇到 `$Time$` 会明确失败，而不是生成残缺文件）。
+- 服务器不支持 Range 时只能单连接从头下载；重试会从头重写，不支持字节级续传。
+- 进程被系统杀死后不会自动后台续跑。中断任务的临时文件与元数据会保留，可在下载页或详情页手动“继续”；HLS / DASH 继续时会重新解析清单并从头拼接。
 - 不含 VPN 分流、悬浮窗、双卡绑定等系统级能力。
 - 内置浏览器依赖 Android System WebView，网页行为受系统 WebView 版本和目标站点策略影响。
 
@@ -146,8 +149,9 @@ SHA-1    5b9dae93c7ec8bb6e2fc996196666548120782cc
 
 - 不集成账号系统、统计 SDK 或广告 SDK。
 - 测速、下载与诊断请求直接发往用户配置的 CDN、DNS 或目标服务器，不经过自建中转。
-- 下载地址、请求头、Cookie 等参数只保存在本机和下载目录的 `.pmdown.json` 元数据中。
+- 下载地址、镜像、DNS 等非敏感参数保存在下载目录的 `.pmdown.json` 中；Cookie、Authorization 只保存在应用私有目录，并已关闭系统云备份。任务完成后会清除本地记录中的鉴权头。
 - IP 归属地数据来自 [DB-IP](https://db-ip.com)，按 CC BY 4.0 使用，可在应用内更新。
+- 在线 IP 归属/出口探测默认走 HTTPS（ipwho.is、ipapi.co、ipinfo.io 等）。这些请求会把待查 IP 发给对应服务；如不希望联网查询，可只使用内置离线库。
 
 ## 开源许可
 
@@ -157,4 +161,4 @@ NetPulse 源码以 [MIT License](LICENSE) 发布。
 
 ## 致谢
 
-界面组织参考了 [FlClash](https://github.com/chen08209/FlClash)，下载交互参考了 [FluxDown](https://github.com/zerx-lab/FluxDown)；同时感谢 Flutter、Rust、rustls、iperf3 与 DB-IP 等开源项目。
+界面组织参考了 [FlClash](https://github.com/chen08209/FlClash)；动态分段、按需拆分与分段覆盖校验的思路参考了 [FluxDown](https://github.com/zerx-lab/FluxDown)。同时感谢 Flutter、Rust、rustls、iperf3 与 DB-IP 等开源项目。

@@ -2,7 +2,7 @@
 
 use crate::dns;
 use crate::http::ResolveCache;
-use crate::{new_task, Task};
+use crate::{new_task, spawn_task, Task};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::{BufRead, BufReader};
@@ -40,8 +40,7 @@ pub fn start_dns(args: Value) -> Result<Value, String> {
         return Err("请输入域名".into());
     }
     let (id, task) = new_task("dns");
-    let t = task.clone();
-    thread::spawn(move || {
+    spawn_task(task, move |task| {
         let host = p.host.trim().to_string();
         let timeout = Duration::from_millis(p.timeout_ms.clamp(500, 20000));
         task.emit(json!({"type": "start", "host": host, "servers": p.servers}));
@@ -59,9 +58,9 @@ pub fn start_dns(args: Value) -> Result<Value, String> {
                         let ips: Vec<String> = a.ips.iter().map(|ip| ip.to_string()).collect();
                         task.emit(json!({
                             "type": "result", "server": server, "record": label,
-                            "ips": ips, "ms": a.elapsed_ms, "rcode": a.rcode,
+                            "ips": ips, "ms": a.elapsed_ms, "rcode": a.rcode, "truncated": a.truncated,
                         }));
-                        all.push(json!({"server": server, "record": label, "ips": ips, "ms": a.elapsed_ms}));
+                        all.push(json!({"server": server, "record": label, "ips": ips, "ms": a.elapsed_ms, "truncated": a.truncated}));
                     }
                     Err(e) => {
                         task.emit(json!({"type": "error", "server": server, "record": label, "message": e}));
@@ -107,8 +106,8 @@ pub fn start_ping(args: Value) -> Result<Value, String> {
         return Err("请输入目标地址".into());
     }
     let (id, task) = new_task("ping");
-    let t = task.clone();
-    thread::spawn(move || {
+    spawn_task(task, move |task| {
+        let t = task.clone();
         let cache = ResolveCache::new(
             p.dns_servers.clone(),
             Duration::from_millis(p.timeout_ms.clamp(1000, 20000)),
@@ -204,8 +203,8 @@ impl Default for NatParams {
 fn stun_query(sock: &UdpSocket, dest: SocketAddr, timeout: Duration) -> Result<SocketAddr, String> {
     let mut txid = [0u8; 12];
     let seed = Instant::now().elapsed().as_nanos() as u64;
-    for i in 0..12 {
-        txid[i] = ((seed >> (i % 8 * 8)) & 0xFF) as u8 ^ (i as u8 * 31);
+    for (i, b) in txid.iter_mut().enumerate() {
+        *b = ((seed >> (i % 8 * 8)) & 0xFF) as u8 ^ (i as u8 * 31);
     }
     let mut req = [0u8; 20];
     req[0] = 0x00;
@@ -289,8 +288,8 @@ fn parse_host_port(s: &str, default_port: u16) -> (String, u16) {
 pub fn start_nat(args: Value) -> Result<Value, String> {
     let p: NatParams = serde_json::from_value(args).map_err(|e| e.to_string())?;
     let (id, task) = new_task("nat");
-    let t = task.clone();
-    thread::spawn(move || {
+    spawn_task(task, move |task| {
+        let t = task.clone();
         // 多 STUN 源顺序探测，单台超时压到 1.5s，避免不可达节点拖慢整体。
         let timeout = Duration::from_millis(p.timeout_ms.clamp(500, 1500));
         let cache = ResolveCache::new(p.dns_servers.clone(), timeout);
@@ -411,8 +410,7 @@ pub fn start_trace(args: Value) -> Result<Value, String> {
         .parse()
         .map_err(|_| "请输入已解析的数字 IP 地址（IPv4/IPv6）".to_string())?;
     let (id, task) = new_task("trace");
-    let t = task.clone();
-    thread::spawn(move || {
+    spawn_task(task, move |task| {
         let result = match target {
             IpAddr::V4(v4) => trace_v4(v4, p.max_hops.clamp(1, 64), p.timeout_ms.clamp(300, 10000), &task),
             IpAddr::V6(_) => Err("IPv6 路由追踪暂未开放".to_string()),
@@ -613,8 +611,8 @@ pub fn start_iperf(args: Value) -> Result<Value, String> {
         return Err("iperf3 可执行文件路径为空".into());
     }
     let (id, task) = new_task("iperf");
-    let t = task.clone();
-    thread::spawn(move || {
+    spawn_task(task, move |task| {
+        let t = task.clone();
         let mut cmd = Command::new(&p.bin);
         cmd.args(&p.args)
             .stdout(Stdio::piped())
@@ -631,7 +629,7 @@ pub fn start_iperf(args: Value) -> Result<Value, String> {
                     let t = t.clone();
                     threads.push(thread::spawn(move || {
                         let reader = BufReader::new(out);
-                        for line in reader.lines().flatten() {
+                        for line in reader.lines().map_while(Result::ok) {
                             t.emit(json!({"type": "line", "stream": "stdout", "line": line}));
                         }
                     }));
@@ -640,7 +638,7 @@ pub fn start_iperf(args: Value) -> Result<Value, String> {
                     let t = t.clone();
                     threads.push(thread::spawn(move || {
                         let reader = BufReader::new(err);
-                        for line in reader.lines().flatten() {
+                        for line in reader.lines().map_while(Result::ok) {
                             t.emit(json!({"type": "line", "stream": "stderr", "line": line}));
                         }
                     }));

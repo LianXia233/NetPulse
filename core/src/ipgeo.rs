@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use std::fs;
 use std::io::Read;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::thread;
 
@@ -24,11 +24,11 @@ struct Entry {
 
 struct Cache {
     key: String,
-    entries: Vec<Entry>,
+    entries: Arc<Vec<Entry>>,
 }
 
 static CACHE: OnceLock<Mutex<Option<Cache>>> = OnceLock::new();
-static SEED: OnceLock<Vec<Entry>> = OnceLock::new();
+static SEED: OnceLock<Arc<Vec<Entry>>> = OnceLock::new();
 
 fn ipv4(s: &str) -> Option<u32> {
     let parts: Vec<&str> = s.trim().split('.').collect();
@@ -131,13 +131,13 @@ fn parse_db(text: &str) -> Vec<Entry> {
     entries
 }
 
-fn seed_entries() -> &'static Vec<Entry> {
+fn seed_entries() -> &'static Arc<Vec<Entry>> {
     SEED.get_or_init(|| {
         let gz = include_bytes!("../assets/ipdb_seed.tsv.gz");
         let mut dec = flate2::read::GzDecoder::new(&gz[..]);
         let mut text = String::new();
         let _ = dec.read_to_string(&mut text);
-        parse_db(&text)
+        Arc::new(parse_db(&text))
     })
 }
 
@@ -151,7 +151,7 @@ fn cache_key(path: &str) -> String {
     }
 }
 
-fn load(path: &str) -> Vec<Entry> {
+fn load(path: &str) -> Arc<Vec<Entry>> {
     let key = cache_key(path);
     let lock = CACHE.get_or_init(|| Mutex::new(None));
     let mut guard = lock.lock().unwrap();
@@ -161,7 +161,11 @@ fn load(path: &str) -> Vec<Entry> {
         }
     }
     let entries = if Path::new(path).exists() {
-        fs::read_to_string(path).map(|t| parse_db(&t)).unwrap_or_default()
+        Arc::new(
+            fs::read_to_string(path)
+                .map(|t| parse_db(&t))
+                .unwrap_or_default(),
+        )
     } else {
         seed_entries().clone()
     };
@@ -507,7 +511,7 @@ pub fn lookup(args: &Value) -> Result<Value, String> {
     let ipn = ipv4(ip).ok_or("仅支持 IPv4 地址")?;
     let path = args["path"].as_str().unwrap_or("");
     let entries = load(path);
-    match find(&entries, ipn) {
+    match find(entries.as_slice(), ipn) {
         Some(e) => Ok(json!({
             "found": true,
             "ip": ip,
@@ -530,7 +534,7 @@ pub fn lookup_many(args: &Value) -> Result<Value, String> {
     let builtin = !Path::new(path).exists();
     let mut out = Vec::with_capacity(ips.len());
     for ip in ips {
-        match ipv4(&ip).and_then(|n| find(&entries, n)) {
+        match ipv4(&ip).and_then(|n| find(entries.as_slice(), n)) {
             Some(e) => out.push(json!({
                 "ip": ip, "found": true, "country_code": e.country,
                 "country": country_name(&e.country), "region": e.region,
@@ -553,12 +557,17 @@ pub fn update(args: &Value) -> Result<Value, String> {
     req.read_timeout = Duration::from_secs(45);
     req.connect_timeout = Duration::from_secs(10);
     req.headers.push(("Accept-Encoding".into(), "identity".into()));
-    let mut resp = send(&req, &http_cache())?;
+    let resp = send(&req, &http_cache())?;
     if resp.status != 200 {
         return Err(format!("下载失败 HTTP {}", resp.status));
     }
+    if let Some(len) = resp.header("content-length").and_then(|v| v.parse::<u64>().ok()) {
+        if len > 128 * 1024 * 1024 {
+            return Err("位置库文件过大（>128MB）".into());
+        }
+    }
     let mut raw = Vec::new();
-    let mut limited = resp.reader.take(256 * 1024 * 1024);
+    let mut limited = resp.reader.take(128 * 1024 * 1024);
     limited.read_to_end(&mut raw).map_err(|e| format!("读取失败: {}", e))?;
     let text = if raw.starts_with(&[0x1f, 0x8b]) {
         let mut dec = flate2::read::GzDecoder::new(&raw[..]);
@@ -605,7 +614,7 @@ fn probe_group(v6: bool, urls: &[&str]) -> Value {
         req.read_timeout = Duration::from_secs(4);
         req.connect_timeout = Duration::from_secs(3);
         match send(&req, &http_cache()) {
-            Ok(mut r) if r.status == 200 => {
+            Ok(r) if r.status == 200 => {
                 let mut body = String::new();
                 if r.reader.take(512 * 1024).read_to_string(&mut body).is_ok() {
                     if let Some(found) = extract_ip(&body, v6) {
@@ -707,7 +716,7 @@ fn fetch_json(url: &str) -> Result<Value, String> {
     req.read_timeout = Duration::from_secs(8);
     req.connect_timeout = Duration::from_secs(5);
     req.headers.push(("Accept".into(), "application/json".into()));
-    let mut resp = send(&req, &http_cache())?;
+    let resp = send(&req, &http_cache())?;
     if resp.status != 200 {
         return Err(format!("HTTP {}", resp.status));
     }
@@ -787,9 +796,8 @@ fn api_auto_one(ip: &str, custom: Option<&str>) -> Result<Value, String> {
             Err(e) => last = e,
         }
     }
-    // 预制在线源：ip-api、ipwho.is、ipapi.co、ipinfo.io，逐个回退。
+    // 预制在线源全部走 HTTPS；不再默认向 ip-api 明文发送用户 IP。
     for url in [
-        format!("http://ip-api.com/json/{}?fields=status,message,country,countryCode,regionName,city,isp,org,as,lat,lon,timezone,query&lang=zh-CN", ip),
         format!("https://ipwho.is/{}", ip),
         format!("https://ipapi.co/{}/json/", ip),
         format!("https://ipinfo.io/{}/json", ip),
@@ -821,8 +829,9 @@ pub fn api_auto_batch(args: &Value) -> Result<Value, String> {
         .unwrap_or_default();
     if ips.is_empty() { return Ok(json!({"items": []})); }
     let custom = args["endpoint"].as_str().map(|s| s.to_string());
+    let requested = ips.len();
     let mut handles = Vec::new();
-    for ip in ips.iter().take(60).cloned() {
+    for ip in ips.into_iter().take(60) {
         let custom = custom.clone();
         handles.push(thread::spawn(move || {
             api_auto_one(&ip, custom.as_deref()).unwrap_or(Value::Null)
@@ -834,39 +843,7 @@ pub fn api_auto_batch(args: &Value) -> Result<Value, String> {
             if !v.is_null() { items.push(v); }
         }
     }
-    Ok(json!({"items": items, "requested": ips.len()}))
-}
-
-/// 批量 IP API（ip-api batch）：一次请求返回多个 IP 的国家/省/市/ISP。
-pub fn api_batch(args: &Value) -> Result<Value, String> {
-    let ips: Vec<String> = args["ips"].as_array()
-        .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
-        .unwrap_or_default();
-    if ips.is_empty() { return Ok(json!({"items": []})); }
-    let endpoint = args["endpoint"].as_str().unwrap_or("");
-    let base = if endpoint.contains("ip-api.com") {
-        let scheme = if endpoint.starts_with("https://") { "https" } else { "http" };
-        format!("{}://ip-api.com/batch", scheme)
-    } else {
-        "http://ip-api.com/batch".to_string()
-    };
-    let url = format!("{}?fields=status,message,country,countryCode,regionName,city,isp,org,as,lat,lon,timezone,query&lang=zh-CN", base);
-    let body = serde_json::to_vec(&ips).map_err(|e| e.to_string())?;
-    let mut req = Req::new("POST", &url);
-    req.read_timeout = Duration::from_secs(12);
-    req.connect_timeout = Duration::from_secs(6);
-    req.headers.push(("Content-Type".into(), "application/json".into()));
-    req.headers.push(("Accept".into(), "application/json".into()));
-    req.body = Some(body);
-    let mut resp = send(&req, &http_cache())?;
-    if resp.status != 200 {
-        return Err(format!("HTTP {}", resp.status));
-    }
-    let mut text = String::new();
-    resp.reader.take(4 * 1024 * 1024).read_to_string(&mut text).map_err(|e| e.to_string())?;
-    let data: Value = serde_json::from_str(text.trim()).map_err(|e| format!("响应不是 JSON: {}", e))?;
-    let items = data.as_array().cloned().unwrap_or_default();
-    Ok(json!({"items": items, "requested": ips.len()}))
+    Ok(json!({"items": items, "requested": requested}))
 }
 
 
@@ -878,7 +855,7 @@ pub fn ip_type(args: &Value) -> Result<Value, String> {
     req.read_timeout = Duration::from_secs(8);
     req.connect_timeout = Duration::from_secs(4);
     req.headers.push(("Accept".into(), "application/json".into()));
-    let mut resp = send(&req, &http_cache())?;
+    let resp = send(&req, &http_cache())?;
     if resp.status != 200 { return Err(format!("HTTP {}", resp.status)); }
     let mut body = String::new();
     resp.reader.take(4 * 1024 * 1024).read_to_string(&mut body).map_err(|e| e.to_string())?;
@@ -944,7 +921,7 @@ pub fn ip_type(args: &Value) -> Result<Value, String> {
 pub fn api(args: &Value) -> Result<Value, String> {
     let ip = args["ip"].as_str().ok_or("缺少 IP")?;
     let endpoint = args["endpoint"].as_str().filter(|s| !s.is_empty())
-        .unwrap_or("http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,isp,org,as,lat,lon,timezone,query&lang=zh-CN");
+        .unwrap_or("https://ipwho.is/{ip}");
     let url = if endpoint.contains("{ip}") {
         endpoint.replace("{ip}", ip)
     } else if endpoint.contains("%s") {
@@ -956,12 +933,47 @@ pub fn api(args: &Value) -> Result<Value, String> {
     req.read_timeout = Duration::from_secs(10);
     req.connect_timeout = Duration::from_secs(6);
     req.headers.push(("Accept".into(), "application/json".into()));
-    let mut resp = send(&req, &http_cache())?;
+    let resp = send(&req, &http_cache())?;
     if resp.status != 200 {
         return Err(format!("HTTP {}", resp.status));
     }
     let mut body = String::new();
     resp.reader.take(2 * 1024 * 1024).read_to_string(&mut body).map_err(|e| e.to_string())?;
     let data: Value = serde_json::from_str(body.trim()).map_err(|e| format!("响应不是 JSON: {}", e))?;
+    // 不同源字段差异较大，统一成 ip-api 风格，UI 只处理一种结构。
+    let data = normalize_api(ip, &data).unwrap_or(data);
     Ok(json!({"ok": true, "endpoint": url, "data": data}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ipv4_parsing() {
+        assert_eq!(ipv4("1.2.3.4"), Some(0x01020304));
+        assert_eq!(ipv4("255.255.255.255"), Some(u32::MAX));
+        assert_eq!(ipv4("256.1.1.1"), None);
+        assert_eq!(ipv4("1.2.3"), None);
+    }
+
+    #[test]
+    fn parse_db_with_header_and_ranges() {
+        let text = "ip_range_start,ip_range_end,country_code,region,city,isp\n\
+                    1.0.0.0,1.0.0.255,AU,Queensland,Brisbane,Example\n\
+                    16777472,16778239,CN,Beijing,Beijing,ISP\n";
+        let entries = parse_db(text);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(find(&entries, 0x01000001).unwrap().country, "AU");
+        assert_eq!(find(&entries, 0x01000100).unwrap().city, "Beijing");
+        assert!(find(&entries, 0x02000000).is_none());
+    }
+
+    #[test]
+    fn parse_db_numeric_without_header() {
+        let text = "0\t100\tZZ\t\t\t\n101\t200\tCN\tP\tC\tI\n";
+        let entries = parse_db(text);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(find(&entries, 150).unwrap().country, "CN");
+    }
 }

@@ -158,7 +158,7 @@ Future<void> showDownloadSheet(
               ),
               child: Text(
                 '保存到 ${dir.text.trim().isEmpty ? '${NativeInfo.filesDir}/downloads' : dir.text.trim()}\n'
-                '鉴权参数会原样透传给下载器（含查询串、Cookie、Referer 与自定义头），并写入续传元数据。',
+                '鉴权参数会原样透传给下载器（含查询串、Cookie、Referer 与自定义头）；Cookie/Authorization 仅保存在本机私有记录，不写入下载目录。',
                 style: context.text.bodySmall?.copyWith(color: pm.muted, height: 1.5),
               ),
             ),
@@ -213,6 +213,7 @@ Future<void> showDownloadSheet(
                   }
                   saveDir = prepared;
                 }
+                if (!context.mounted) return;
                 final r = Core.i.call('start_download', {
                   'url': link,
                   'mirrors': mirrorList,

@@ -37,33 +37,35 @@ String encodeSpeedToml({
 }
 
 SpeedTomlConfig decodeSpeedToml(String text) {
-  String clean(String s) => s.replaceAll(RegExp(r'["\\,]+$'), '').trim();
-  final urls = RegExp(_urlPattern)
-      .allMatches(text)
-      .map((m) => clean(m.group(0)!))
-      .where((e) => Uri.tryParse(e)?.host.isNotEmpty == true)
-      .toList();
+  String clean(String s) => s.replaceAll(RegExp(r'["\],]+$'), '').trim();
   final uploads = <String>[];
   final download = <String>[];
+  String? section;
+  final uploadRe = RegExp(r'^\s*(upload|uploads|upload_url)\s*=',
+      caseSensitive: false);
+  final downloadRe = RegExp(r'^\s*(endpoints|download|downloads|urls)\s*=',
+      caseSensitive: false);
   for (final line in text.split('\n')) {
-    final lower = line.toLowerCase();
-    final matches = RegExp(_urlPattern).allMatches(line);
-    if (matches.isEmpty) continue;
-    final url = clean(matches.first.group(0)!);
-    if (lower.contains('upload') || lower.contains('上传')) {
-      uploads.add(url);
-    } else {
-      download.add(url);
+    final trimmed = line.trim();
+    if (trimmed.isEmpty || trimmed.startsWith('#')) continue;
+    final lower = trimmed.toLowerCase();
+    if (uploadRe.hasMatch(lower)) {
+      section = 'upload';
+    } else if (downloadRe.hasMatch(lower)) {
+      section = 'download';
     }
-  }
-  if (download.isEmpty) {
-    for (final u in urls) {
-      if (!uploads.contains(u)) download.add(u);
+    final matches = RegExp(_urlPattern).allMatches(trimmed);
+    for (final m in matches) {
+      final url = clean(m.group(0)!);
+      if (Uri.tryParse(url)?.host.isNotEmpty != true) continue;
+      final isUpload = section == 'upload' ||
+          (section == null && lower.contains('upload'));
+      (isUpload ? uploads : download).add(url);
     }
   }
   final seen = <String>{};
   return SpeedTomlConfig(
     download: download.where(seen.add).toList(),
-    uploads: uploads.where((e) => e.isNotEmpty).toList()..sort(),
+    uploads: uploads.where((e) => e.isNotEmpty).toSet().toList()..sort(),
   );
 }

@@ -7,7 +7,7 @@
 //! - 采样线程按 sample_ms 输出瞬时 Mbps，结束后给出稳态均值/峰值。
 
 use crate::http::{parse_bind, parse_url, send, Req, ResolveCache};
-use crate::{new_task, Task};
+use crate::{new_task, spawn_task, Task};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::io::Read;
@@ -72,8 +72,7 @@ pub fn start(args: Value) -> Result<Value, String> {
         return Err("mode 只能是 download / upload".into());
     }
     let (id, task) = new_task("speed");
-    let t = task.clone();
-    thread::spawn(move || run(p, t));
+    spawn_task(task, move |t| run(p, t));
     Ok(json!({"task_id": id}))
 }
 
@@ -165,7 +164,7 @@ fn run(p: SpeedParams, task: Arc<Task>) {
     let bytes = Arc::new(AtomicU64::new(0));
     let errors = Arc::new(AtomicU64::new(0));
     let active = Arc::new(AtomicU64::new(0));
-    let workers = p.workers.clamp(1, 128);
+    let workers = p.workers.clamp(1, 32);
     let deadline = Instant::now() + Duration::from_millis(p.duration_ms.clamp(1000, 600000));
     let limit = p.total_limit_bytes;
 
@@ -180,7 +179,6 @@ fn run(p: SpeedParams, task: Arc<Task>) {
         let cancel = cancel.clone();
         let mode = p.mode.clone();
         let buffer = p.buffer_kb.clamp(4, 4096) * 1024;
-        let bind_ip = bind_ip;
         let bind_if = bind_if.clone();
         handles.push(thread::spawn(move || {
             worker(
@@ -198,7 +196,7 @@ fn run(p: SpeedParams, task: Arc<Task>) {
     let mut smooth: f64 = 0.0;
     let mut has_smooth = false;
     let mut anchor: Option<(Instant, u64)> = None;
-    let warm_ms = (p.duration_ms as f64 * 0.15).max(800.0).min(4000.0) as u64;
+    let warm_ms = (p.duration_ms as f64 * 0.15).clamp(800.0, 4000.0) as u64;
 
     task.set_status("running");
     loop {
@@ -265,6 +263,7 @@ fn run(p: SpeedParams, task: Arc<Task>) {
         "duration_ms": end_time.duration_since(start).as_millis(),
         "errors": errors.load(Ordering::Relaxed),
         "workers": workers,
+        "cancelled": cancelled,
         "endpoints": p.endpoints,
     });
     task.emit(json!({"type": "done", "summary": summary}));
@@ -487,7 +486,7 @@ fn upload_once(
         .push(("Content-Type".into(), "application/octet-stream".into()));
     req.headers
         .push(("Cache-Control".into(), "no-cache".into()));
-    req.body = Some((**body).clone());
+    req.body = Some(body.clone());
     let counter = bytes.clone();
     req.write_progress = Some(std::sync::Arc::new(move |n| {
         counter.fetch_add(n as u64, Ordering::Relaxed);

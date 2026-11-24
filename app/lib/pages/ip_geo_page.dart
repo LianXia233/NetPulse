@@ -71,9 +71,13 @@ class _IpGeoPageState extends State<IpGeoPage> {
 
   String get _dbPath => '${NativeInfo.filesDir}/ipdb.tsv';
 
+  bool _started = false;
+
   @override
-  void initState() {
-    super.initState();
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_started) return;
+    _started = true;
     final store = AppScope.of(context);
     _dbUrl = TextEditingController(text: store.ipdbUrl);
     _api = TextEditingController(text: store.ipApiEndpoint);
@@ -358,7 +362,7 @@ class _IpGeoPageState extends State<IpGeoPage> {
                   PmField(
                     controller: _api,
                     label: '接口地址（{ip} 占位）',
-                    hint: 'http://ip-api.com/json/{ip}?fields=...',
+                    hint: 'https://ipwho.is/{ip}',
                     maxLines: 2,
                   ),
                   const SizedBox(height: 10),

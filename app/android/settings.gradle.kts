@@ -10,14 +10,21 @@ pluginManagement {
 
     includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
 
+    val isCi = !System.getenv("CI").isNullOrEmpty()
     repositories {
-        maven { url = uri("https://mirrors.cloud.tencent.com/nexus/repository/maven-public/") }
-        maven { url = uri("https://maven.aliyun.com/repository/google") }
-        maven { url = uri("https://maven.aliyun.com/repository/public") }
-        maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
+        if (!isCi) {
+            maven { url = uri("https://maven.aliyun.com/repository/google") }
+            maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
+            maven { url = uri("https://maven.aliyun.com/repository/public") }
+        }
         google()
         mavenCentral()
         gradlePluginPortal()
+        if (isCi) {
+            maven { url = uri("https://maven.aliyun.com/repository/google") }
+            maven { url = uri("https://maven.aliyun.com/repository/gradle-plugin") }
+            maven { url = uri("https://maven.aliyun.com/repository/public") }
+        }
     }
 }
 
@@ -28,12 +35,24 @@ plugins {
 }
 
 dependencyResolutionManagement {
+    val isCi = !System.getenv("CI").isNullOrEmpty()
     repositories {
-        maven { url = uri("https://mirrors.cloud.tencent.com/nexus/repository/maven-public/") }
-        maven { url = uri("https://maven.aliyun.com/repository/google") }
-        maven { url = uri("https://maven.aliyun.com/repository/public") }
+        // Flutter engine 的 io.flutter:* 构件在独立 Maven 仓库；
+        // 通过 settings 声明，避免受 Gradle 仓库模式影响。国内可用
+        // FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn 覆盖。
+        val flutterStorage = System.getenv("FLUTTER_STORAGE_BASE_URL")
+            ?: "https://storage.googleapis.com"
+        maven { url = uri("$flutterStorage/download.flutter.io") }
+        if (!isCi) {
+            maven { url = uri("https://maven.aliyun.com/repository/google") }
+            maven { url = uri("https://maven.aliyun.com/repository/public") }
+        }
         google()
         mavenCentral()
+        if (isCi) {
+            maven { url = uri("https://maven.aliyun.com/repository/google") }
+            maven { url = uri("https://maven.aliyun.com/repository/public") }
+        }
     }
 }
 

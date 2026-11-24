@@ -386,6 +386,7 @@ class _BrowserPageState extends State<BrowserPage> {
 
   Future<void> _paste() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
+    if (!mounted) return;
     final text = data?.text?.trim() ?? '';
     if (text.isEmpty) {
       pmToast(context, '剪贴板为空');

@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:ui' show FontFeature;
 import 'package:flutter/material.dart';
 import '../bridge.dart';
 import '../ip_geo_widgets.dart';
@@ -68,7 +67,7 @@ class _SpeedPageState extends State<SpeedPage> {
 
   void _saveHistory(CoreTask t) {
     final summary = t.summary;
-    if (summary == null) return;
+    if (summary == null || summary['cancelled'] == true) return;
     final store = AppScope.of(context);
     final avg = (summary['steady_mbps'] ?? summary['avg_mbps'] as num?)?.toDouble() ?? 0;
     store.addHistory(

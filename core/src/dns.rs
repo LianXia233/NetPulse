@@ -83,9 +83,14 @@ fn skip_name(buf: &[u8], mut pos: usize) -> Result<usize, String> {
     }
 }
 
-fn parse_response(buf: &[u8], want: u16) -> Result<(Vec<IpAddr>, u16, bool), String> {
+fn parse_response(buf: &[u8], want: u16, expect_id: Option<u16>) -> Result<(Vec<IpAddr>, u16, bool), String> {
     if buf.len() < 12 {
         return Err("DNS 响应过短".into());
+    }
+    if let Some(id) = expect_id {
+        if u16::from_be_bytes([buf[0], buf[1]]) != id {
+            return Err("DNS 响应 ID 不匹配".into());
+        }
     }
     let flags = u16::from_be_bytes([buf[2], buf[3]]);
     let rcode = flags & 0x000F;
@@ -128,19 +133,6 @@ fn parse_response(buf: &[u8], want: u16) -> Result<(Vec<IpAddr>, u16, bool), Str
         pos += rdlen;
     }
     Ok((ips, rcode, truncated))
-}
-
-fn read_line_tcp(stream: &mut TcpStream) -> Result<String, String> {
-    let mut s = String::new();
-    let mut b = [0u8; 1];
-    loop {
-        stream.read_exact(&mut b).map_err(|e| e.to_string())?;
-        if b[0] == b'\n' {
-            break;
-        }
-        s.push(b[0] as char);
-    }
-    Ok(s)
 }
 
 fn split_dot_spec(server: &str) -> (String, u16) {
@@ -216,7 +208,7 @@ fn query_dot(host: &str, server: &str, qtype: u16, timeout: Duration) -> Result<
                     last = format!("DoT 读取响应失败: {}", e);
                     continue;
                 }
-                let (ips, rcode, truncated) = parse_response(&buf, qtype)?;
+                let (ips, rcode, truncated) = parse_response(&buf, qtype, Some(id))?;
                 return Ok(Answer {
                     ips,
                     elapsed_ms: start.elapsed().as_millis(),
@@ -250,9 +242,9 @@ fn query_doh(host: &str, server: &str, qtype: u16, timeout: Duration) -> Result<
     req.headers.push(("Content-Type".into(), "application/dns-message".into()));
     req.headers.push(("Accept".into(), "application/dns-message".into()));
     req.headers.push(("Accept-Encoding".into(), "identity".into()));
-    req.body = Some(pkt);
+    req.body = Some(std::sync::Arc::new(pkt));
     let cache = crate::http::ResolveCache::new(Vec::new(), timeout);
-    let mut resp = crate::http::send(&req, &cache)?;
+    let resp = crate::http::send(&req, &cache)?;
     if resp.status != 200 {
         return Err(format!("DoH HTTP {}", resp.status));
     }
@@ -261,7 +253,7 @@ fn query_doh(host: &str, server: &str, qtype: u16, timeout: Duration) -> Result<
         .take(512 * 1024)
         .read_to_end(&mut body)
         .map_err(|e| format!("DoH 读取失败: {}", e))?;
-    let (ips, rcode, truncated) = parse_response(&body, qtype)?;
+    let (ips, rcode, truncated) = parse_response(&body, qtype, Some(id))?;
     Ok(Answer {
         ips,
         elapsed_ms: start.elapsed().as_millis(),
@@ -277,12 +269,27 @@ fn query_tcp(host: &str, server: &str, qtype: u16, timeout: Duration) -> Result<
     let mut stream =
         TcpStream::connect_timeout(&SocketAddr::new(ip, port), timeout).map_err(|e| e.to_string())?;
     stream.set_read_timeout(Some(timeout)).ok();
+    stream.set_write_timeout(Some(timeout)).ok();
     let id = (start.elapsed().as_nanos() as u16) ^ 0x5A5A;
     let pkt = build_query(host, qtype, id);
-    stream.write_all(&pkt).map_err(|e| e.to_string())?;
-    let mut buf = vec![0u8; 4096];
-    let n = stream.read(&mut buf).map_err(|e| e.to_string())?;
-    let (ips, rcode, truncated) = parse_response(&buf[..n], qtype)?;
+    // RFC 1035：TCP DNS 报文前必须有 2 字节长度前缀。
+    stream
+        .write_all(&(pkt.len() as u16).to_be_bytes())
+        .and_then(|_| stream.write_all(&pkt))
+        .map_err(|e| e.to_string())?;
+    let mut len_buf = [0u8; 2];
+    stream
+        .read_exact(&mut len_buf)
+        .map_err(|e| format!("DNS TCP 读取长度失败: {}", e))?;
+    let len = u16::from_be_bytes(len_buf) as usize;
+    if !(12..=65535).contains(&len) {
+        return Err(format!("DNS TCP 响应长度异常: {}", len));
+    }
+    let mut buf = vec![0u8; len];
+    stream
+        .read_exact(&mut buf)
+        .map_err(|e| format!("DNS TCP 读取响应失败: {}", e))?;
+    let (ips, rcode, truncated) = parse_response(&buf, qtype, Some(id))?;
     Ok(Answer {
         ips,
         elapsed_ms: start.elapsed().as_millis(),
@@ -312,10 +319,31 @@ pub fn query(host: &str, server: &str, qtype: u16, timeout: Duration) -> Result<
     sock.send_to(&pkt, SocketAddr::new(ip, port))
         .map_err(|e| format!("DNS send: {}", e))?;
     let mut buf = vec![0u8; 2048];
-    let (n, _) = sock
-        .recv_from(&mut buf)
-        .map_err(|e| format!("DNS recv: {}", e))?;
-    let (ips, rcode, truncated) = parse_response(&buf[..n], qtype)?;
+    let deadline = start + timeout;
+    let mut n = 0usize;
+    for _ in 0..8 {
+        let remain = deadline.saturating_duration_since(Instant::now());
+        if remain.is_zero() {
+            return Err("DNS recv 超时".into());
+        }
+        sock.set_read_timeout(Some(remain)).ok();
+        let (got, from) = sock
+            .recv_from(&mut buf)
+            .map_err(|e| format!("DNS recv: {}", e))?;
+        // 丢弃不是目标服务器、或 ID 不匹配的报文，避免接受伪造应答。
+        if from.ip() != ip || from.port() != port {
+            continue;
+        }
+        if got >= 2 && u16::from_be_bytes([buf[0], buf[1]]) != id {
+            continue;
+        }
+        n = got;
+        break;
+    }
+    if n == 0 {
+        return Err("DNS 无有效响应".into());
+    }
+    let (ips, rcode, truncated) = parse_response(&buf[..n], qtype, Some(id))?;
     if truncated {
         return query_tcp(host, server, qtype, timeout);
     }

@@ -10,7 +10,7 @@ NetPulse 自身源码以 [MIT License](LICENSE) 发布。本文件列出随 APK 
 | webview_flutter | WebView 插件 | BSD-3-Clause | https://pub.dev/packages/webview_flutter |
 | Rust / serde / serde_json | 核心运行时与 JSON 桥 | MIT / Apache-2.0 | https://www.rust-lang.org |
 | rustls / webpki-roots | TLS 与根证书 | Apache-2.0 / ISC / MPL-2.0 | https://github.com/rustls/rustls |
-| AES / CBC / regex 等 Rust crate | HLS AES-128 解密与清单解析 | MIT / Apache-2.0 | https://crates.io |
+| AES / CBC / regex / idna 等 Rust crate | HLS AES-128 解密、清单解析与 IDN 域名转换 | MIT / Apache-2.0 | https://crates.io |
 | iperf3 | 内置网络打流 | BSD-3-Clause | https://github.com/esnet/iperf |
 | Android System WebView | 内置浏览器渲染内核 | Apache-2.0 | https://developer.android.com/guide/webapps |
 | DB-IP | 内置 IP 归属地数据 | CC BY 4.0 | https://db-ip.com |

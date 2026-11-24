@@ -35,49 +35,97 @@ pub struct ParsedUrl {
     pub host: String,
     pub port: u16,
     pub path: String,
+    /// URL 里的 user:pass（如果有），用于生成 Basic Authorization。
+    pub userinfo: Option<String>,
+}
+
+impl ParsedUrl {
+    pub fn origin(&self) -> String {
+        format!("{}://{}:{}", self.scheme, self.host, self.port)
+    }
 }
 
 pub fn parse_url(u: &str) -> Result<ParsedUrl, String> {
-    let (scheme, rest) = u
+    let raw = u.trim();
+    let (scheme, rest) = raw
         .split_once("://")
-        .ok_or_else(|| format!("无效 URL: {}", u))?;
+        .ok_or_else(|| format!("无效 URL: {}", raw))?;
     let scheme = scheme.to_ascii_lowercase();
-    let (authority, path) = match rest.find(|c| c == '/' || c == '?') {
+    if scheme != "http" && scheme != "https" {
+        return Err(format!("仅支持 HTTP(S): {}", scheme));
+    }
+    // 片段不会发给服务器。
+    let rest = rest.split('#').next().unwrap_or(rest);
+    let (authority, path) = match rest.find(['/', '?']) {
         Some(i) => {
             let tail = &rest[i..];
-            (&rest[..i], if tail.starts_with('?') { format!("/{}", tail) } else { tail.to_string() })
+            (
+                &rest[..i],
+                if tail.starts_with('?') {
+                    format!("/{}", tail)
+                } else {
+                    tail.to_string()
+                },
+            )
         }
         None => (rest, "/".to_string()),
     };
     if authority.is_empty() {
         return Err("URL 缺少主机".into());
     }
-    let (host, port) = if authority.starts_with('[') {
-        let end = authority
+    // 剥离 user:pass@，避免把它当成主机名。
+    let (userinfo, hostport) = match authority.rfind('@') {
+        Some(i) if i > 0 => (Some(authority[..i].to_string()), &authority[i + 1..]),
+        Some(i) => (None, &authority[i + 1..]),
+        None => (None, authority),
+    };
+    let (host, port) = if hostport.starts_with('[') {
+        let end = hostport
             .find(']')
             .ok_or_else(|| "IPv6 地址缺少 ]".to_string())?;
-        let host = authority[1..end].to_string();
-        let port = if authority[end + 1..].starts_with(':') {
-            authority[end + 2..].parse::<u16>().unwrap_or(default_port(&scheme))
+        let host = hostport[1..end].to_string();
+        let port = if hostport[end + 1..].starts_with(':') {
+            hostport[end + 2..]
+                .parse::<u16>()
+                .map_err(|_| "端口无效".to_string())?
         } else {
             default_port(&scheme)
         };
         (host, port)
-    } else if let Some(i) = authority.rfind(':') {
-        (
-            authority[..i].to_string(),
-            authority[i + 1..]
-                .parse::<u16>()
-                .unwrap_or_else(|_| default_port(&scheme)),
-        )
+    } else if let Some(i) = hostport.rfind(':') {
+        if hostport[..i].contains(':') {
+            // 未加方括号的 IPv6 字面量。
+            (hostport.to_string(), default_port(&scheme))
+        } else {
+            (
+                hostport[..i].to_string(),
+                hostport[i + 1..]
+                    .parse::<u16>()
+                    .map_err(|_| "端口无效".to_string())?,
+            )
+        }
     } else {
-        (authority.to_string(), default_port(&scheme))
+        (hostport.to_string(), default_port(&scheme))
     };
+    if host.is_empty() {
+        return Err("URL 缺少主机".into());
+    }
+    // 域名做 IDNA/punycode 转换；IP 字面量保持原样。
+    let host = if host.parse::<IpAddr>().is_ok() {
+        host
+    } else {
+        idna::domain_to_ascii(&host)
+            .unwrap_or_else(|_| host.to_ascii_lowercase())
+    };
+    if host.is_empty() {
+        return Err("URL 缺少主机".into());
+    }
     Ok(ParsedUrl {
         scheme,
         host,
         port,
         path: path.to_string(),
+        userinfo,
     })
 }
 
@@ -87,6 +135,30 @@ fn default_port(scheme: &str) -> u16 {
     } else {
         80
     }
+}
+
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[((n >> 18) & 63) as usize] as char);
+        out.push(TABLE[((n >> 12) & 63) as usize] as char);
+        out.push(if chunk.len() > 1 {
+            TABLE[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            TABLE[(n & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    out
 }
 
 pub struct CacheEntry {
@@ -252,7 +324,7 @@ pub struct Req {
     pub method: String,
     pub url: String,
     pub headers: Vec<(String, String)>,
-    pub body: Option<Vec<u8>>,
+    pub body: Option<Arc<Vec<u8>>>,
     pub read_timeout: Duration,
     pub connect_timeout: Duration,
     pub max_redirects: u8,
@@ -275,7 +347,7 @@ impl Req {
             read_timeout: Duration::from_secs(15),
             connect_timeout: Duration::from_secs(8),
             max_redirects: 5,
-            user_agent: "NetPulse/1.0".to_string(),
+            user_agent: "NetPulse/1.1".to_string(),
             pin_ip: None,
             pin_dns: None,
             bind_ip: None,
@@ -284,14 +356,16 @@ impl Req {
         }
     }
 
-    pub fn header(mut self, k: &str, v: &str) -> Self {
-        self.headers.push((k.to_string(), v.to_string()));
-        self
-    }
-
-    pub fn body(mut self, b: Vec<u8>) -> Self {
-        self.body = Some(b);
-        self
+    /// 跨域重定向时剥离凭据，避免 Cookie/Bearer 泄露给第三方域名。
+    fn without_credentials(&self) -> Req {
+        let mut next = self.clone();
+        next.headers.retain(|(k, _)| {
+            !matches!(
+                k.to_ascii_lowercase().as_str(),
+                "authorization" | "cookie" | "proxy-authorization"
+            )
+        });
+        next
     }
 }
 
@@ -533,30 +607,50 @@ impl<R: Read> Read for ChunkedReader<R> {
     }
 }
 
-fn absolutize(base: &ParsedUrl, location: &str) -> String {
-    if location.starts_with("http://") || location.starts_with("https://") {
-        return location.to_string();
-    }
-    if location.starts_with("//") {
-        return format!("{}:{}", base.scheme, location);
-    }
-    if location.starts_with('/') {
-        let port = if (base.scheme == "https" && base.port == 443)
-            || (base.scheme == "http" && base.port == 80)
-        {
-            String::new()
-        } else {
-            format!(":{}", base.port)
-        };
-        return format!(
-            "{}://{}{}{}",
-            base.scheme, base.host, port, location
-        );
-    }
-    let dir = match base.path.rfind('/') {
-        Some(i) => &base.path[..=i],
-        None => "/",
+fn normalize_path(path: &str) -> String {
+    let (raw, query) = match path.split_once('?') {
+        Some((p, q)) => (p, Some(q)),
+        None => (path, None),
     };
+    let leading = raw.starts_with('/');
+    let trailing = raw.ends_with('/') && raw.len() > 1;
+    let mut parts: Vec<&str> = Vec::new();
+    for seg in raw.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            s => parts.push(s),
+        }
+    }
+    let mut out = String::new();
+    if leading {
+        out.push('/');
+    }
+    out.push_str(&parts.join("/"));
+    if trailing && !out.ends_with('/') {
+        out.push('/');
+    }
+    if out.is_empty() {
+        out.push('/');
+    }
+    if let Some(q) = query {
+        out.push('?');
+        out.push_str(q);
+    }
+    out
+}
+
+fn absolutize(base: &ParsedUrl, location: &str) -> String {
+    let loc = location.trim();
+    let loc = loc.split('#').next().unwrap_or(loc);
+    if loc.starts_with("http://") || loc.starts_with("https://") {
+        return loc.to_string();
+    }
+    if loc.starts_with("//") {
+        return format!("{}:{}", base.scheme, loc);
+    }
     let port = if (base.scheme == "https" && base.port == 443)
         || (base.scheme == "http" && base.port == 80)
     {
@@ -564,7 +658,19 @@ fn absolutize(base: &ParsedUrl, location: &str) -> String {
     } else {
         format!(":{}", base.port)
     };
-    format!("{}://{}{}{}{}", base.scheme, base.host, port, dir, location)
+    let base_path = base.path.split('?').next().unwrap_or("/");
+    let target = if loc.starts_with('/') {
+        normalize_path(loc)
+    } else if loc.starts_with('?') {
+        format!("{}{}", base_path, loc)
+    } else {
+        let dir = match base_path.rfind('/') {
+            Some(i) => &base_path[..=i],
+            None => "/",
+        };
+        normalize_path(&format!("{}{}", dir, loc))
+    };
+    format!("{}://{}{}{}", base.scheme, base.host, port, target)
 }
 
 pub fn send(req: &Req, cache: &ResolveCache) -> Result<Response, String> {
@@ -572,19 +678,34 @@ pub fn send(req: &Req, cache: &ResolveCache) -> Result<Response, String> {
     let mut method = req.method.clone();
     let mut body = req.body.clone();
     let mut left = req.max_redirects;
+    let mut prev_origin: Option<String> = None;
     loop {
         let parsed = parse_url(&url)?;
-        let resp = send_once(&parsed, &method, req, body.as_deref(), cache)?;
+        let origin = parsed.origin();
+        let current = if prev_origin.as_deref().is_some_and(|p| p != origin) {
+            req.without_credentials()
+        } else {
+            req.clone()
+        };
+        let resp = send_once(
+            &parsed,
+            &method,
+            &current,
+            body.as_deref().map(|b| b.as_slice()),
+            cache,
+        )?;
         if resp.status >= 300 && resp.status < 400 && left > 0 {
             if let Some(loc) = resp.header("location").map(|s| s.to_string()) {
                 let status = resp.status;
                 drop(resp);
                 url = absolutize(&parsed, &loc);
-                if status == 303 {
+                // 301/302/303 的 POST 按浏览器惯例退化为 GET；307/308 保留方法。
+                if (300..=303).contains(&status) && method != "GET" && method != "HEAD" {
                     method = "GET".to_string();
                     body = None;
                 }
                 left -= 1;
+                prev_origin = Some(origin);
                 continue;
             }
         }
@@ -638,7 +759,7 @@ fn send_once(
         Box::new(tcp) as Box<dyn RW>
     });
 
-    // 组装请求
+    // 组装请求：默认头只在用户没有显式提供时写入，避免重复 User-Agent/Accept。
     let host_header = if parsed.port == default_port(&parsed.scheme) {
         parsed.host.clone()
     } else if parsed.host.contains(':') {
@@ -646,19 +767,48 @@ fn send_once(
     } else {
         format!("{}:{}", parsed.host, parsed.port)
     };
-    let mut head = format!(
-        "{} {} HTTP/1.1\r\nHost: {}\r\nUser-Agent: {}\r\nAccept: */*\r\nConnection: close\r\n",
-        method, parsed.path, host_header, req.user_agent
-    );
+    let mut head = format!("{} {} HTTP/1.1\r\nHost: {}\r\n", method, parsed.path, host_header);
+    let has_header = |name: &str| {
+        req.headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case(name))
+    };
+    if !has_header("user-agent") {
+        head.push_str(&format!("User-Agent: {}\r\n", req.user_agent));
+    }
+    if !has_header("accept") {
+        head.push_str("Accept: */*\r\n");
+    }
+    head.push_str("Connection: close\r\n");
+    let user_has_auth = has_header("authorization");
+    let mut written = std::collections::HashSet::new();
     for (k, v) in &req.headers {
+        let lk = k.to_ascii_lowercase();
+        // Host / Connection / Content-Length 由客户端统一管理，避免请求走私。
+        if matches!(lk.as_str(), "host" | "connection" | "content-length") {
+            continue;
+        }
+        if !written.insert(lk) {
+            continue;
+        }
+        if k.bytes().any(|b| b == b'\r' || b == b'\n')
+            || v.bytes().any(|b| b == b'\r' || b == b'\n')
+        {
+            continue;
+        }
         head.push_str(&format!("{}: {}\r\n", k, v));
     }
+    if !user_has_auth {
+        if let Some(ui) = &parsed.userinfo {
+            let (user, pass) = ui.split_once(':').unwrap_or((ui.as_str(), ""));
+            head.push_str(&format!(
+                "Authorization: Basic {}\r\n",
+                base64_encode(format!("{}:{}", user, pass).as_bytes())
+            ));
+        }
+    }
     if let Some(b) = body {
-        if !req
-            .headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-        {
+        if !has_header("content-length") && !has_header("transfer-encoding") {
             head.push_str(&format!("Content-Length: {}\r\n", b.len()));
         }
     }
@@ -723,3 +873,71 @@ fn send_once(
     })
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_plain_url() {
+        let p = parse_url("https://Example.com/a/b?x=1#frag").unwrap();
+        assert_eq!(p.scheme, "https");
+        assert_eq!(p.host, "example.com");
+        assert_eq!(p.port, 443);
+        assert_eq!(p.path, "/a/b?x=1");
+        assert!(p.userinfo.is_none());
+    }
+
+    #[test]
+    fn parse_url_with_userinfo_and_port() {
+        let p = parse_url("http://user:pass@host.test:8080/file").unwrap();
+        assert_eq!(p.host, "host.test");
+        assert_eq!(p.port, 8080);
+        assert_eq!(p.userinfo.as_deref(), Some("user:pass"));
+    }
+
+    #[test]
+    fn parse_url_ipv6() {
+        let p = parse_url("https://[2001:db8::1]:8443/x").unwrap();
+        assert_eq!(p.host, "2001:db8::1");
+        assert_eq!(p.port, 8443);
+        assert_eq!(p.path, "/x");
+    }
+
+    #[test]
+    fn parse_url_idn() {
+        let p = parse_url("https://例子.测试/a").unwrap();
+        assert!(p.host.starts_with("xn--"));
+    }
+
+    #[test]
+    fn parse_url_rejects_bad_input() {
+        assert!(parse_url("ftp://example.com/x").is_err());
+        assert!(parse_url("https://example.com:abc/x").is_err());
+        assert!(parse_url("https:///x").is_err());
+    }
+
+    #[test]
+    fn absolutize_relative_forms() {
+        let base = parse_url("https://h.test/a/b/file?x=1").unwrap();
+        assert_eq!(absolutize(&base, "c.bin"), "https://h.test/a/b/c.bin");
+        assert_eq!(absolutize(&base, "/root"), "https://h.test/root");
+        assert_eq!(absolutize(&base, "?y=2"), "https://h.test/a/b/file?y=2");
+        assert_eq!(absolutize(&base, "../up"), "https://h.test/a/up");
+        assert_eq!(absolutize(&base, "//cdn.test/x"), "https://cdn.test/x");
+    }
+
+    #[test]
+    fn base64_known_values() {
+        assert_eq!(base64_encode(b"user:pass"), "dXNlcjpwYXNz");
+        assert_eq!(base64_encode(b"a"), "YQ==");
+        assert_eq!(base64_encode(b"ab"), "YWI=");
+    }
+
+    #[test]
+    fn normalize_path_cases() {
+        assert_eq!(normalize_path("/a/./b/../c"), "/a/c");
+        assert_eq!(normalize_path("/a//b/"), "/a/b/");
+        assert_eq!(normalize_path("?q=1"), "/?q=1");
+    }
+}

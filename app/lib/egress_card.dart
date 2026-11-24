@@ -104,8 +104,14 @@ class EgressOverviewCard extends StatelessWidget {
                     children: [
                       const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
                       const SizedBox(width: 10),
-                      Text('正在探测当前出口 IPv4 / IPv6…',
-                          style: context.text.bodyMedium?.copyWith(color: pm.muted)),
+                      Expanded(
+                        child: Text(
+                          '正在探测当前出口 IPv4 / IPv6…',
+                          style: context.text.bodyMedium?.copyWith(color: pm.muted),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
                     ],
                   ),
                 )

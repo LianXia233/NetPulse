@@ -1,7 +1,9 @@
 package com.netpulse.app
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.NetworkCapabilities
@@ -29,6 +31,7 @@ class MainActivity : FlutterActivity() {
     private val reqPick = 1002
     private val reqSave = 1003
     private val reqStorage = 1004
+    private val reqWrite = 1005
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -39,7 +42,10 @@ class MainActivity : FlutterActivity() {
                     mapOf(
                         "files" to filesDir.absolutePath,
                         "cache" to cacheDir.absolutePath,
-                        "nativeLib" to applicationInfo.nativeLibraryDir
+                        "nativeLib" to applicationInfo.nativeLibraryDir,
+                        "sdkInt" to Build.VERSION.SDK_INT,
+                        "iperf" to File(applicationInfo.nativeLibraryDir, "libiperf3.so")
+                            .let { it.isFile && it.canExecute() }
                     )
                 )
                 "network" -> result.success(networkInfo())
@@ -66,7 +72,15 @@ class MainActivity : FlutterActivity() {
                         val intent = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                             addCategory(Intent.CATEGORY_OPENABLE)
                             type = "*/*"
-                            putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("text/plain", "text/x-toml", "application/toml"))
+                            putExtra(
+                                Intent.EXTRA_MIME_TYPES,
+                                arrayOf(
+                                    "text/plain",
+                                    "text/x-toml",
+                                    "application/toml",
+                                    "application/octet-stream"
+                                )
+                            )
                         }
                         startActivityForResult(intent, reqPick)
                     } catch (e: Exception) {
@@ -109,13 +123,42 @@ class MainActivity : FlutterActivity() {
             val base = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
             val dir = File(base, "NetPulse")
             if (!dir.exists()) dir.mkdirs()
-            if (dir.isDirectory) dir.absolutePath else null
+            if (dir.isDirectory && dir.canWrite()) dir.absolutePath else null
         } catch (_: Exception) {
             null
         }
     }
 
+    /// Android 7–10 在无法写公共目录时退回应用专属目录（无需权限，卸载即清理）。
+    private fun ensureAppDownloadDir(): String {
+        val base = getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: filesDir
+        val dir = File(base, "NetPulse")
+        dir.mkdirs()
+        return dir.absolutePath
+    }
+
+    private fun hasWritePermission(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        return checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    private fun requestWritePermission(result: MethodChannel.Result, forDirectoryPicker: Boolean) {
+        if (forDirectoryPicker) pendingDirResult = result else pendingPrepResult = result
+        requestPermissions(
+            arrayOf(
+                Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                Manifest.permission.READ_EXTERNAL_STORAGE
+            ),
+            reqWrite
+        )
+    }
+
     private fun prepareDownloadDir(result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R && !hasWritePermission()) {
+            requestWritePermission(result, forDirectoryPicker = false)
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
             if (pendingPrepResult != null) {
                 result.error("busy", "正在等待存储权限", null)
@@ -134,12 +177,15 @@ class MainActivity : FlutterActivity() {
             }
             return
         }
-        val path = ensureDownloadDir()
-        if (path == null) result.error("mkdir_failed", "无法创建 Download/NetPulse", null)
-        else result.success(path)
+        val path = ensureDownloadDir() ?: ensureAppDownloadDir()
+        result.success(path)
     }
 
     private fun selectDirectory(result: MethodChannel.Result) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R && !hasWritePermission()) {
+            requestWritePermission(result, forDirectoryPicker = true)
+            return
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
             try {
                 val intent = Intent(
@@ -216,19 +262,42 @@ class MainActivity : FlutterActivity() {
         return out
     }
 
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != reqWrite) return
+        val prep = pendingPrepResult
+        pendingPrepResult = null
+        if (prep != null) {
+            if (hasWritePermission()) prepareDownloadDir(prep)
+            else prep.success(ensureAppDownloadDir())
+            return
+        }
+        val dir = pendingDirResult
+        pendingDirResult = null
+        if (dir != null) {
+            if (!hasWritePermission()) {
+                dir.error("need_permission", "未授予存储权限，无法选择公共目录", null)
+            } else {
+                selectDirectory(dir)
+            }
+        }
+    }
+
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == reqStorage) {
             val result = pendingPrepResult
             pendingPrepResult = null
             if (result == null) return
-            val path = ensureDownloadDir()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
-                result.error("need_permission", "未授予“所有文件访问权限”，无法写入 Download/NetPulse", null)
-            } else if (path == null) {
-                result.error("mkdir_failed", "无法创建 Download/NetPulse", null)
+                // 用户拒绝“所有文件访问”时退回应用专属目录，保证下载功能可用。
+                result.success(ensureAppDownloadDir())
             } else {
-                result.success(path)
+                result.success(ensureDownloadDir() ?: ensureAppDownloadDir())
             }
             return
         }

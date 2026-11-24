@@ -38,3 +38,4 @@ app/android/local.properties
 
 # Native build output (vendored iperf3 .so stays, core .so is built)
 app/android/app/src/main/jniLibs/**/libnetpulse_core.so
+app/android/build/

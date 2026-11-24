@@ -1,4 +1,3 @@
-import 'dart:ui' show FontFeature;
 import 'package:flutter/material.dart';
 
 /// 设计语言：iOS 蓝种子色、八色主题、超椭圆卡片、柔和层次。
@@ -63,6 +62,7 @@ class PmColors extends ThemeExtension<PmColors> {
         warnSoft: Color(0xFFFCEAE3),
       );
 
+  @override
   PmColors copyWith({
     Color? page,
     Color? card,

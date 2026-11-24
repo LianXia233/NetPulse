@@ -45,6 +45,7 @@ class HistoryRecord {
 }
 
 const String kDefaultDownloadDir = '/storage/emulated/0/Download/NetPulse';
+const String kAppVersion = '1.1.0';
 
 class AppStore extends ChangeNotifier {
   ThemeMode themeMode = ThemeMode.system;
@@ -54,8 +55,6 @@ class AppStore extends ChangeNotifier {
   int workers = 8;
   int durationSec = 15;
   int sampleMs = 1000;
-  bool randomRange = true;
-  bool multiCdn = true;
   List<String> endpoints = const [
     'https://speed.cloudflare.com/__down?bytes=50000000',
     'https://speed.hetzner.de/100MB.bin',
@@ -103,7 +102,7 @@ class AppStore extends ChangeNotifier {
   String downloadDnsMode = 'all';
   String speedDnsMode = 'all';
   String ipdbUrl = '';
-  String ipApiEndpoint = 'http://ip-api.com/json/{ip}?fields=status,message,country,regionName,city,isp,org,as,lat,lon,timezone,query&lang=zh-CN';
+  String ipApiEndpoint = 'https://ipwho.is/{ip}';
   String get downloadDirEffective =>
       downloadDir.trim().isEmpty ? kDefaultDownloadDir : downloadDir.trim();
   List<HistoryRecord> history = [];
@@ -129,8 +128,6 @@ class AppStore extends ChangeNotifier {
         workers = (j['workers'] as int? ?? 8).clamp(1, 64);
         durationSec = (j['durationSec'] as int? ?? 15).clamp(3, 120);
         sampleMs = (j['sampleMs'] as int? ?? 1000).clamp(100, 2000);
-        randomRange = j['randomRange'] != false;
-        multiCdn = j['multiCdn'] != false;
         if (j['endpoints'] is List) {
           endpoints = (j['endpoints'] as List).map((e) => e.toString()).toList();
         }
@@ -164,6 +161,10 @@ class AppStore extends ChangeNotifier {
         speedDnsMode = j['speedDnsMode']?.toString() ?? speedDnsMode;
         ipdbUrl = j['ipdbUrl']?.toString() ?? ipdbUrl;
         ipApiEndpoint = j['ipApiEndpoint']?.toString() ?? ipApiEndpoint;
+        // 旧版本默认使用明文 ip-api，升级后迁移到 HTTPS 源。
+        if (ipApiEndpoint.contains('ip-api.com')) {
+          ipApiEndpoint = 'https://ipwho.is/{ip}';
+        }
         if (j['history'] is List) {
           history = (j['history'] as List)
               .whereType<Map>()
@@ -192,8 +193,6 @@ class AppStore extends ChangeNotifier {
       'workers': workers,
       'durationSec': durationSec,
       'sampleMs': sampleMs,
-      'randomRange': randomRange,
-      'multiCdn': multiCdn,
       'endpoints': endpoints,
       'dnsServers': dnsServers,
       'uploadEndpoint': uploadEndpoint,
@@ -259,18 +258,6 @@ class AppStore extends ChangeNotifier {
 
   void setSampleMs(int value) {
     sampleMs = value.clamp(100, 2000);
-    save();
-    notifyListeners();
-  }
-
-  void setRandomRange(bool value) {
-    randomRange = value;
-    save();
-    notifyListeners();
-  }
-
-  void setMultiCdn(bool value) {
-    multiCdn = value;
     save();
     notifyListeners();
   }
@@ -413,7 +400,7 @@ class AppStore extends ChangeNotifier {
       downloadRecords[index] = record;
     } else {
       downloadRecords.insert(0, record);
-      if (downloadRecords.length > 50) downloadRecords.removeRange(50, downloadRecords.length);
+      if (downloadRecords.length > 200) downloadRecords.removeRange(200, downloadRecords.length);
     }
     if (persist) save();
     if (notify) notifyListeners();

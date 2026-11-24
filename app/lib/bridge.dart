@@ -211,6 +211,10 @@ class CoreTask extends ChangeNotifier {
   void dispose() {
     _timer?.cancel();
     if (running) Core.i.cancel(id);
+    // 释放 Rust 侧任务记录，避免每次测速/诊断都留下一个 Task。
+    try {
+      Core.i.dispose(id);
+    } catch (_) {}
     super.dispose();
   }
 }
@@ -242,6 +246,8 @@ class NativeInfo {
   static String filesDir = '';
   static String cacheDir = '';
   static String nativeLibDir = '';
+  static int sdkInt = 0;
+  static bool iperfAvailable = false;
   static String networkType = '未知';
   static String localIp = '';
   static int ipPrefix = 0;
@@ -264,6 +270,8 @@ class NativeInfo {
       filesDir = paths?['files'] as String? ?? '';
       cacheDir = paths?['cache'] as String? ?? '';
       nativeLibDir = paths?['nativeLib'] as String? ?? '';
+      sdkInt = (paths?['sdkInt'] as num?)?.toInt() ?? 0;
+      iperfAvailable = paths?['iperf'] == true;
     } catch (_) {
       filesDir = Directory.systemTemp.path;
     }
@@ -346,8 +354,9 @@ class NativeInfo {
     }
   }
 
-  static String get iperfPath =>
-      nativeLibDir.isEmpty ? '' : '$nativeLibDir/libiperf3.so';
+  static String get iperfPath => nativeLibDir.isEmpty
+      ? ''
+      : '$nativeLibDir/libiperf3.so';
 
   static Future<void> openUrl(String url) async {
     try {

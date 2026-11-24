@@ -387,7 +387,7 @@ Future<Map<String, dynamic>?> _apiDetail(String ip, String endpoint) async {
       if (data != null && data['status'] == 'success') return data;
     }
     // 自定义源失败时，回退到内置的在线多源（仍失败则由离线库展示）。
-    final fallback = Core.i.call('ip_geo_auto', {'ip': ip});
+    final fallback = await Core.callAsync('ip_geo_auto', {'ip': ip});
     if (fallback['ok'] == true) {
       return (fallback['data'] as Map?)?.cast<String, dynamic>();
     }

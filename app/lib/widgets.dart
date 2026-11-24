@@ -1,5 +1,4 @@
 import 'dart:math' as math;
-import 'dart:ui' show FontFeature;
 import 'package:flutter/material.dart';
 import 'theme.dart';
 
@@ -134,7 +133,7 @@ class PmSectionTitle extends StatelessWidget {
               ],
             ),
           ),
-          if (trailing != null) trailing!,
+          ?trailing,
         ],
       ),
     );
@@ -1063,7 +1062,7 @@ class PmField extends StatelessWidget {
                   ),
                 ),
               ),
-              if (suffix != null) suffix!,
+              ?suffix,
             ],
           ),
         ),

@@ -231,7 +231,7 @@ class SettingsPage extends StatelessWidget {
                       _Row(
                         icon: Icons.info_outline_rounded,
                         title: '版本信息',
-                        subtitle: 'NetPulse 1.0.8 · Flutter ${_flutterVersion()} · ${Core.i.ready ? Core.i.version() : 'core 未加载'}',
+                        subtitle: 'NetPulse $kAppVersion · Flutter ${_flutterVersion()} · ${Core.i.ready ? Core.i.version() : 'core 未加载'}',
                         onTap: () => _about(context),
                       ),
                     ],
@@ -588,7 +588,8 @@ class SettingsPage extends StatelessWidget {
                     pmToast(context, '请填写链接或资源接口');
                     return;
                   }
-                  final r = Core.i.call('resource_links', {'url': v});
+                  final r = await Core.callAsync('resource_links', {'url': v});
+                  if (!context.mounted) return;
                   if (r['ok'] != true) {
                     pmToast(context, '不是可解析的资源 JSON：${r['error']}');
                     return;
@@ -895,7 +896,7 @@ class SettingsPage extends StatelessWidget {
   }
 
   void _about(BuildContext context) {
-    final version = '1.0.9';
+    final version = kAppVersion;
     showPmSheet(
       context,
       title: '关于 NetPulse',

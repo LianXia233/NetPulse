@@ -4,9 +4,9 @@
 
 use crate::dns;
 use crate::http::{parse_bind, parse_url, send, Req, ResolveCache};
-use crate::{new_task, Task};
+use crate::{new_task, spawn_task, Task};
 use serde_json::{json, Value};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::IpAddr;
@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
 
@@ -58,7 +58,6 @@ impl WorkerStat {
 }
 
 pub struct DlState {
-    pub id: String,
     pub url: String,
     pub mirrors: Vec<String>,
     pub headers: Vec<(String, String)>,
@@ -66,10 +65,6 @@ pub struct DlState {
     pub connections: usize,
     pub block_kb: u32,
     pub retries: u32,
-    pub bind_ip: Option<IpAddr>,
-    pub bind_if: String,
-    pub ip_mode: String,
-    pub dns_mode: String,
     pub name: String,
     pub dir: String,
     pub kind: Mutex<String>,
@@ -84,6 +79,7 @@ pub struct DlState {
     pub meta_path: Mutex<PathBuf>,
     pub final_path: Mutex<PathBuf>,
     pub chunk_bounds: Mutex<Vec<(u64, u64)>>,
+    #[allow(clippy::type_complexity)]
     pub chunk_done: Mutex<Option<Arc<Mutex<Vec<Arc<AtomicU64>>>>>>,
     /// 详情页专用聚合快照，最多 160 格；避免每次 detail 都遍历全部分块。
     pub cells: Mutex<Vec<(u64, u64, u64, u64)>>,
@@ -91,6 +87,14 @@ pub struct DlState {
     pub chunk_size: AtomicU64,
     pub cdn: Mutex<Vec<CdnEntry>>,
     pub workers: Mutex<Vec<Arc<WorkerStat>>>,
+    /// 服务器拒绝多连接（403/429）后动态下调的并发上限。
+    pub conn_cap: AtomicUsize,
+    /// 探测拿到的校验信息，用于判断续传是否仍然有效。
+    pub etag: Mutex<Option<String>>,
+    pub last_modified: Mutex<Option<String>>,
+    pub target_key: String,
+    /// dl_delete 请求删除文件时置位，由任务线程退出时统一清理，避免误删仍在写入的文件。
+    pub delete_on_exit: AtomicBool,
 }
 
 static DLS: OnceLock<Mutex<HashMap<String, Arc<DlState>>>> = OnceLock::new();
@@ -109,6 +113,56 @@ impl Drop for DlRunGuard {
     }
 }
 
+/// 正在写入的目标文件集合：同一最终路径只允许一个活跃任务，
+/// 避免两个任务共用临时文件互相写坏。
+static TARGETS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+
+fn targets() -> &'static Mutex<HashSet<String>> {
+    TARGETS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn reserve_target(key: &str) -> Result<(), String> {
+    let mut set = targets().lock().unwrap();
+    if !set.insert(key.to_string()) {
+        return Err("同名文件正在下载，请等待完成或修改文件名".into());
+    }
+    Ok(())
+}
+
+fn release_target(key: &str) {
+    targets().lock().unwrap().remove(key);
+}
+
+struct TargetLease {
+    key: String,
+}
+impl TargetLease {
+    fn take(key: &str) -> Self {
+        Self { key: key.to_string() }
+    }
+}
+impl Drop for TargetLease {
+    fn drop(&mut self) {
+        release_target(&self.key);
+    }
+}
+
+/// 任务线程退出时清理临时文件；只在线程真正停止后执行，避免删除仍在写入的文件。
+struct DlCleanup {
+    state: Arc<DlState>,
+    data: PathBuf,
+    meta: PathBuf,
+}
+impl Drop for DlCleanup {
+    fn drop(&mut self) {
+        if self.state.delete_on_exit.load(Ordering::Relaxed) {
+            let _ = fs::remove_file(&self.data);
+            let _ = fs::remove_file(&self.meta);
+        }
+    }
+}
+
+/// 按字符而不是字节截断，避免破坏 UTF-8 边界导致 panic。
 fn sanitize(name: &str) -> String {
     let mut out: String = name
         .chars()
@@ -119,14 +173,39 @@ fn sanitize(name: &str) -> String {
                 c
             }
         })
+        .take(80)
         .collect();
-    if out.len() > 180 {
-        out.truncate(180);
-    }
-    if out.trim().is_empty() {
+    out = out.trim().trim_matches('.').to_string();
+    if out.is_empty() {
         out = "download.bin".into();
     }
     out
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = |b: u8| -> Option<u8> {
+                match b {
+                    b'0'..=b'9' => Some(b - b'0'),
+                    b'a'..=b'f' => Some(b - b'a' + 10),
+                    b'A'..=b'F' => Some(b - b'A' + 10),
+                    _ => None,
+                }
+            };
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
 }
 
 fn name_from_url(u: &str) -> String {
@@ -135,8 +214,68 @@ fn name_from_url(u: &str) -> String {
     if last.is_empty() || last.contains("__down") {
         "netpulse_download.bin".into()
     } else {
-        sanitize(last)
+        sanitize(&percent_decode(last))
     }
+}
+
+/// 稳定的短哈希，用于让不同 URL 的同名文件拥有独立临时文件。
+fn url_hash(url: &str, name: &str) -> String {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in url.as_bytes().iter().chain(name.as_bytes()) {
+        h ^= *b as u64;
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    format!("{:016x}", h)
+}
+
+/// 目标文件重名时生成 "name (1).ext"，绝不静默覆盖已有文件。
+fn unique_final_name(dir: &Path, name: &str) -> String {
+    if !dir.join(name).exists() {
+        return name.to_string();
+    }
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((s, e)) if !s.is_empty() => (s, format!(".{}", e)),
+        _ => (name, String::new()),
+    };
+    for i in 1..=9999 {
+        let candidate = format!("{} ({}){}", stem, i, ext);
+        if !dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{} ({}){}", stem, now_secs(), ext)
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// FluxDown 风格的分段不变量：所有分段必须恰好覆盖 [0, size)。
+fn validate_coverage(bounds: &[(u64, u64)], size: u64) -> Result<(), String> {
+    if size == 0 || bounds.is_empty() {
+        return Err("分段为空".into());
+    }
+    let mut sorted: Vec<(u64, u64)> = bounds.to_vec();
+    sorted.sort_by_key(|(s, _)| *s);
+    if sorted[0].0 != 0 {
+        return Err(format!("首段起点为 {}，应为 0", sorted[0].0));
+    }
+    if sorted[sorted.len() - 1].1 != size - 1 {
+        return Err(format!("末段终点为 {}，应为 {}", sorted[sorted.len() - 1].1, size - 1));
+    }
+    for w in sorted.windows(2) {
+        if w[0].1.checked_add(1) != Some(w[1].0) {
+            return Err(format!("分段不连续/重叠: {} 与 {}", w[0].1, w[1].0));
+        }
+    }
+    let total: u64 = sorted.iter().map(|(s, e)| e - s + 1).sum();
+    if total != size {
+        return Err(format!("分段总长 {} != {}", total, size));
+    }
+    Ok(())
 }
 
 /// 解析资源清单 JSON（例如游戏启动器的 resource?key=... 接口），
@@ -150,8 +289,17 @@ pub fn resolve_resource_links(args: &Value) -> Result<Value, String> {
     req.read_timeout = Duration::from_secs(12);
     req.connect_timeout = Duration::from_secs(6);
     req.headers.push(("Accept".into(), "application/json".into()));
+    if let Some(o) = args["headers"].as_object() {
+        for (k, v) in o {
+            if let Some(v) = v.as_str() {
+                if !k.is_empty() && !v.is_empty() {
+                    req.headers.push((k.clone(), v.to_string()));
+                }
+            }
+        }
+    }
     let cache = ResolveCache::new(Vec::new(), Duration::from_secs(6));
-    let mut resp = send(&req, &cache)?;
+    let resp = send(&req, &cache)?;
     if resp.status != 200 {
         return Err(format!("资源接口 HTTP {}", resp.status));
     }
@@ -221,13 +369,17 @@ pub fn add(args: Value) -> Result<Value, String> {
         .ok_or("缺少下载地址")?
         .trim()
         .to_string();
+    let parsed = parse_url(&url)?;
+    if parsed.host.is_empty() {
+        return Err("下载地址缺少主机".into());
+    }
     let dir = args["dir"]
         .as_str()
         .ok_or("缺少保存目录")?
         .to_string();
     let mut name = args["name"]
         .as_str()
-        .map(|s| sanitize(s))
+        .map(sanitize)
         .unwrap_or_else(|| name_from_url(&url));
     // 流式清单本身不是可播放文件：默认落盘为 .ts / .mp4，并替换掉清单扩展名。
     if is_hls_url(&url) {
@@ -252,7 +404,7 @@ pub fn add(args: Value) -> Result<Value, String> {
             a.iter()
                 .filter_map(|v| v.as_str())
                 .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty() && s != &url)
+                .filter(|s| !s.is_empty() && s != &url && parse_url(s).is_ok())
                 .collect()
         })
         .unwrap_or_default();
@@ -262,7 +414,12 @@ pub fn add(args: Value) -> Result<Value, String> {
         .map(|o| {
             o.iter()
                 .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+                .filter(|(k, v)| {
+                    !k.is_empty()
+                        && !v.is_empty()
+                        && !k.bytes().any(|b| b == b'\r' || b == b'\n')
+                        && !v.bytes().any(|b| b == b'\r' || b == b'\n')
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -279,10 +436,19 @@ pub fn add(args: Value) -> Result<Value, String> {
     let dir_path = PathBuf::from(&dir);
     fs::create_dir_all(&dir_path).map_err(|e| format!("无法创建目录: {}", e))?;
 
+    if !resume {
+        name = unique_final_name(&dir_path, &name);
+    }
+    let hash = url_hash(&url, &name);
+    let data_path = dir_path.join(format!(".{}.{}.pmdown", name, hash));
+    let meta_path = dir_path.join(format!(".{}.{}.pmdown.json", name, hash));
+    let final_path = dir_path.join(&name);
+    let target_key = final_path.to_string_lossy().to_string();
+    reserve_target(&target_key)?;
+
     let (task_id, task) = new_task("download");
     let id = task_id.clone();
     let state = Arc::new(DlState {
-        id: id.clone(),
         url: url.clone(),
         mirrors: mirrors.clone(),
         headers: headers.clone(),
@@ -290,10 +456,6 @@ pub fn add(args: Value) -> Result<Value, String> {
         connections,
         block_kb,
         retries,
-        bind_ip,
-        bind_if: bind_if.clone(),
-        ip_mode: ip_mode.clone(),
-        dns_mode: dns_mode.clone(),
         name: name.clone(),
         dir: dir.clone(),
         kind: Mutex::new("http".into()),
@@ -304,9 +466,9 @@ pub fn add(args: Value) -> Result<Value, String> {
         speed_kbps: AtomicU64::new(0),
         status: Mutex::new("probing".into()),
         error: Mutex::new(None),
-        data_path: Mutex::new(dir_path.join(format!(".{}.pmdown", name))),
-        meta_path: Mutex::new(dir_path.join(format!(".{}.pmdown.json", name))),
-        final_path: Mutex::new(dir_path.join(&name)),
+        data_path: Mutex::new(data_path),
+        meta_path: Mutex::new(meta_path),
+        final_path: Mutex::new(final_path),
         chunk_bounds: Mutex::new(Vec::new()),
         chunk_done: Mutex::new(None),
         cells: Mutex::new(Vec::new()),
@@ -314,12 +476,16 @@ pub fn add(args: Value) -> Result<Value, String> {
         chunk_size: AtomicU64::new(0),
         cdn: Mutex::new(Vec::new()),
         workers: Mutex::new(Vec::new()),
+        conn_cap: AtomicUsize::new(connections),
+        etag: Mutex::new(None),
+        last_modified: Mutex::new(None),
+        target_key: target_key.clone(),
+        delete_on_exit: AtomicBool::new(false),
     });
     dls().lock().unwrap().insert(id.clone(), state.clone());
 
     let st = state.clone();
-    let tk = task.clone();
-    thread::spawn(move || {
+    spawn_task(task, move |tk| {
         run(st, tk, connections, dns_servers, mirrors, headers, retries, block_kb, bind_ip, bind_if, ip_mode, dns_mode)
     });
     Ok(json!({"task_id": task_id, "id": id, "name": name}))
@@ -333,18 +499,31 @@ fn build_req(method: &str, url: &str, headers: &[(String, String)]) -> Req {
     r
 }
 
-fn build_cdn_pool(urls: &[String], servers: &[String]) -> Vec<CdnEntry> {
+fn build_cdn_pool(
+    urls: &[String],
+    servers: &[String],
+    ip_mode: &str,
+    dns_mode: &str,
+) -> Vec<CdnEntry> {
     let mut out: Vec<CdnEntry> = Vec::new();
+    let mut servers = servers.to_vec();
+    if dns_mode == "primary" && servers.len() > 1 {
+        servers.truncate(1);
+    }
+    let qtypes: &[u16] = match ip_mode {
+        "v4" => &[1],
+        "v6" => &[28],
+        _ => &[1, 28],
+    };
     for url in urls {
         let host = match parse_url(url) {
             Ok(p) => p.host,
             Err(_) => continue,
         };
         let mut got = false;
-        // 设置里配置了几台 DNS 就全部查询，A / AAAA 都取；
-        // 每条记录保留命中的 DNS 与耗时，Worker 才能显示真实来源。
-        for qtype in [1u16, 28u16] {
-            for a in dns::query_all(&host, servers, qtype, Duration::from_secs(3)) {
+        // 按设置选择 A/AAAA 与 DNS 数量；每条记录保留命中的 DNS 与耗时。
+        for &qtype in qtypes {
+            for a in dns::query_all(&host, &servers, qtype, Duration::from_secs(3)) {
                 if a.ips.is_empty() {
                     continue;
                 }
@@ -364,6 +543,7 @@ fn build_cdn_pool(urls: &[String], servers: &[String]) -> Vec<CdnEntry> {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     state: Arc<DlState>,
     task: Arc<Task>,
@@ -378,6 +558,12 @@ fn run(
     ip_mode: String,
     dns_mode: String,
 ) {
+    let _lease = TargetLease::take(&state.target_key);
+    let _cleanup = DlCleanup {
+        state: state.clone(),
+        data: state.data_path.lock().unwrap().clone(),
+        meta: state.meta_path.lock().unwrap().clone(),
+    };
     while DL_ACTIVE.fetch_add(1, Ordering::Relaxed) >= 3 {
         DL_ACTIVE.fetch_sub(1, Ordering::Relaxed);
         if task.cancel.load(Ordering::Relaxed) {
@@ -433,6 +619,12 @@ fn run(
                     .header("accept-ranges")
                     .map(|v| v.to_ascii_lowercase().contains("bytes"))
                     .unwrap_or(false);
+                if let Some(v) = r.header("etag") {
+                    *state.etag.lock().unwrap() = Some(v.to_string());
+                }
+                if let Some(v) = r.header("last-modified") {
+                    *state.last_modified.lock().unwrap() = Some(v.to_string());
+                }
                 break;
             } else {
                 head_err = format!("HEAD HTTP {}", r.status);
@@ -460,6 +652,12 @@ fn run(
                         .and_then(|v| v.parse::<u64>().ok())
                         .unwrap_or(0);
                 }
+                if let Some(v) = r.header("etag") {
+                    *state.etag.lock().unwrap() = Some(v.to_string());
+                }
+                if let Some(v) = r.header("last-modified") {
+                    *state.last_modified.lock().unwrap() = Some(v.to_string());
+                }
             }
             Err(e) => {
                 *state.error.lock().unwrap() = Some(format!("{} / {}", head_err, e));
@@ -485,7 +683,7 @@ fn run(
         "name": state.name, "path": final_path.to_string_lossy()
     }));
 
-    let pool = Arc::new(build_cdn_pool(&all_urls, &state.dns));
+    let pool = Arc::new(build_cdn_pool(&all_urls, &state.dns, &ip_mode, &dns_mode));
     *state.cdn.lock().unwrap() = (*pool).clone();
     task.emit(json!({
         "type": "cdn",
@@ -494,12 +692,16 @@ fn run(
 
     // 2) 分段（默认 6 倍连接数的动态队列）
     let target_chunks = (connections * 6).max(1) as u64;
-    let auto_chunk = ((size + target_chunks - 1) / target_chunks).max(1 << 20);
-    let chunk_size = if block_kb > 0 {
+    let auto_chunk = size.div_ceil(target_chunks).max(1 << 20);
+    let mut chunk_size = if block_kb > 0 {
         (block_kb as u64 * 1024).max(64 * 1024).min(size.max(1))
     } else {
         auto_chunk
     };
+    // 分块过多会让进度事件、元数据和详情聚合都变得昂贵；上限 4096 段。
+    if chunk_size > 0 && size / chunk_size > 4096 {
+        chunk_size = size.div_ceil(4096);
+    }
     let mut chunks: Vec<(u64, u64, u64)> = Vec::new(); // start, end, done
     if supports_range {
         let mut pos = 0u64;
@@ -512,40 +714,39 @@ fn run(
         chunks.push((0, size - 1, 0));
     }
     let connections = if supports_range { connections } else { 1 };
-    // 断点续传：resume 时直接沿用元数据里的分块边界，
-    // 即使分片大小/线程数改过，也不会把旧进度套到新布局上。
-    if let Ok(text) = fs::read_to_string(&meta_path) {
-        if let Ok(meta) = serde_json::from_str::<Value>(&text) {
-            if meta["url"].as_str() == Some(state.url.as_str())
-                && meta["size"].as_u64() == Some(size)
-            {
-                if let Some(arr) = meta["chunks"].as_array() {
-                    if state.resume {
+    // 断点续传：只有用户显式 resume，且 URL/大小/校验信息一致时才复用旧分块边界。
+    // resume=false 的“重新下载”必须完全忽略旧进度，避免把旧 done 套到新布局上。
+    if state.resume {
+        if let Ok(text) = fs::read_to_string(&meta_path) {
+            if let Ok(meta) = serde_json::from_str::<Value>(&text) {
+                let same_url = meta["url"].as_str() == Some(state.url.as_str());
+                let same_size = meta["size"].as_u64() == Some(size);
+                let etag_ok = match (
+                    meta["etag"].as_str(),
+                    state.etag.lock().unwrap().as_deref(),
+                ) {
+                    (Some(old), Some(new)) => old == new,
+                    _ => true,
+                };
+                if same_url && same_size && etag_ok {
+                    if let Some(arr) = meta["chunks"].as_array() {
                         let mut restored: Vec<(u64, u64, u64)> = arr
                             .iter()
                             .filter_map(|c| {
                                 let s = c["start"].as_u64()?;
                                 let e = c["end"].as_u64()?;
                                 let d = c["done"].as_u64().unwrap_or(0);
-                                if e < s || e >= size { return None; }
+                                if e < s || e >= size {
+                                    return None;
+                                }
                                 Some((s, e, d.min(e - s + 1)))
                             })
                             .collect();
                         restored.sort_by_key(|c| c.0);
-                        let covers = !restored.is_empty()
-                            && restored.first().map(|c| c.0) == Some(0)
-                            && restored.last().map(|c| c.1) == Some(size - 1)
-                            && restored.windows(2).all(|w| w[0].1 + 1 >= w[1].0);
-                        if covers {
+                        let bounds: Vec<(u64, u64)> =
+                            restored.iter().map(|c| (c.0, c.1)).collect();
+                        if validate_coverage(&bounds, size).is_ok() {
                             chunks = restored;
-                        }
-                    } else {
-                        for (i, c) in arr.iter().enumerate() {
-                            if i < chunks.len() {
-                                let done = c["done"].as_u64().unwrap_or(0)
-                                    .min(chunks[i].1 - chunks[i].0 + 1);
-                                chunks[i].2 = done;
-                            }
                         }
                     }
                 }
@@ -554,12 +755,25 @@ fn run(
     }
     let file = match OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&data_path)
     {
         Ok(f) => {
-            if f.metadata().map(|m| m.len()).unwrap_or(0) != size {
+            let existing = f.metadata().map(|m| m.len()).unwrap_or(0);
+            let high_water = chunks
+                .iter()
+                .map(|(s, _, d)| s.saturating_add(*d))
+                .max()
+                .unwrap_or(0);
+            // 临时文件被清理/截断时，旧的 done 计数不可信：全部重下。
+            if high_water > existing {
+                for c in chunks.iter_mut() {
+                    c.2 = 0;
+                }
+            }
+            if existing != size {
                 let _ = f.set_len(size);
             }
             Arc::new(f)
@@ -603,13 +817,12 @@ fn run(
 
     let headers = Arc::new(headers.clone());
     let bind_if = Arc::new(bind_if);
-    let retries = retries;
     let wstats: Vec<Arc<WorkerStat>> = (0..connections).map(|w| Arc::new(WorkerStat::new(w))).collect();
     *state.workers.lock().unwrap() = wstats.clone();
     // 连接数按需爬升：先 2 条探路，服务器持续供流时再逐步加码。
-    let ramp = Arc::new(AtomicUsize::new(connections.min(2).max(1)));
+    let ramp = Arc::new(AtomicUsize::new(connections.clamp(1, 2)));
     let mut handles = Vec::new();
-    for w in 0..connections {
+    for (w, stat) in wstats.iter().enumerate().take(connections) {
         let state = state.clone();
         let cache = cache.clone();
         let file = file.clone();
@@ -623,7 +836,7 @@ fn run(
         let task = task.clone();
         let headers = headers.clone();
         let pool = pool.clone();
-        let stat = wstats[w].clone();
+        let stat = stat.clone();
         let bind_if = bind_if.clone();
         let ramp = ramp.clone();
         handles.push(thread::spawn(move || loop {
@@ -689,13 +902,12 @@ fn run(
                     &file,
                     &cd,
                     limit.as_ref(),
-                    &state.done,
                     &cancel,
-                    &task,
                     supports_range,
                     &stat,
                     bind_ip,
                     bind_if.as_str(),
+                    &state.conn_cap,
                 );
                 match r {
                     Err(e) if extra < 3 && !cancel.load(Ordering::Relaxed) => {
@@ -745,12 +957,31 @@ fn run(
         .collect();
     let mut stall_since: Vec<Instant> = vec![Instant::now(); prev_done.len()];
     let mut split_count = 0usize;
+    let mut last_meta_save = Instant::now();
     loop {
         thread::sleep(Duration::from_millis(500));
         let elapsed_ms = start.elapsed().as_millis() as usize;
-        let target = (2 + elapsed_ms / 700).min(connections);
+        let target = (2 + elapsed_ms / 700)
+            .min(connections)
+            .min(state.conn_cap.load(Ordering::Relaxed).max(1));
         ramp.store(target, Ordering::Relaxed);
-        let done = state.done.load(Ordering::Relaxed).min(size);
+        // 进度由各分段的 cursor 统一汇总，worker 不再累加全局计数器；
+        // 这样重试、分段拆分都不会重复计数。
+        let done = {
+            let meta = chunks_meta.lock().unwrap();
+            let dv = chunk_done.lock().unwrap();
+            let mut total = 0u64;
+            for (i, (s, e)) in meta.iter().enumerate() {
+                let d = dv
+                    .get(i)
+                    .map(|c| c.load(Ordering::Relaxed))
+                    .unwrap_or(0)
+                    .min(e.saturating_sub(*s) + 1);
+                total = total.saturating_add(d);
+            }
+            total.min(size)
+        };
+        state.done.store(done, Ordering::Relaxed);
         if done > watch_done {
             watch_done = done;
             last_progress = Instant::now();
@@ -764,6 +995,13 @@ fn run(
             *state.error.lock().unwrap() = Some(msg.clone());
             *state.status.lock().unwrap() = "error".into();
             state.speed_kbps.store(0, Ordering::Relaxed);
+            cancel.store(true, Ordering::Relaxed);
+            for h in handles {
+                let _ = h.join();
+            }
+            let meta_now = chunks_meta.lock().unwrap().clone();
+            let done_now = chunk_done.lock().unwrap();
+            let _ = save_meta(&meta_path, &state, size, &done_now, &meta_now);
             task.emit(json!({"type": "error", "message": msg}));
             task.finish("error", json!({"error": msg, "done": done, "size": size}));
             return;
@@ -803,6 +1041,7 @@ fn run(
                 if active
                     && d < total
                     && remaining > 512 * 1024
+                    && supports_range
                     && now.duration_since(stall_since[idx]) > Duration::from_millis(1200)
                     && split_count < connections * 2
                 {
@@ -816,7 +1055,7 @@ fn run(
                         prev_done.push(0);
                         stall_since.push(now);
                         split_count += 1;
-                        let _ = task.emit(json!({
+                        task.emit(json!({
                             "type": "split", "index": idx, "at": split_at,
                             "left": [s, split_at], "right": [split_at + 1, e],
                         }));
@@ -829,16 +1068,22 @@ fn run(
                 let st = w.state.lock().unwrap();
                 *st != "下载中" && *st != "失败"
             }).count();
-            if idle > 0 && claimed >= scan_len && done < size && split_count < connections * 2 {
+            if supports_range
+                && idle > 0
+                && claimed >= scan_len
+                && done < size
+                && split_count < connections * 2
+            {
                 let mut best: Option<(usize, u64)> = None;
                 for idx in 0..scan_len {
                     let d = done_vec[idx].load(Ordering::Relaxed);
                     let (s, e) = meta[idx];
                     let remain = (e - s + 1).saturating_sub(d);
-                    if d < e - s + 1 && remain > 512 * 1024 {
-                        if best.map(|(_, r)| remain > r).unwrap_or(true) {
-                            best = Some((idx, remain));
-                        }
+                    if d < e - s + 1
+                        && remain > 512 * 1024
+                        && best.map(|(_, r)| remain > r).unwrap_or(true)
+                    {
+                        best = Some((idx, remain));
                     }
                 }
                 if let Some((idx, remain)) = best {
@@ -854,7 +1099,7 @@ fn run(
                         prev_done.push(0);
                         stall_since.push(now);
                         split_count += 1;
-                        let _ = task.emit(json!({
+                        task.emit(json!({
                             "type": "split", "index": idx, "at": split_at,
                             "left": [s, split_at], "right": [split_at + 1, e],
                             "reason": "idle-rescue",
@@ -879,11 +1124,16 @@ fn run(
             "type": "progress", "done": done, "size": size,
             "mbps": (mbps * 100.0).round() / 100.0,
             "elapsed_ms": start.elapsed().as_millis(),
-            "chunks": done_counts,
         }));
         last = Instant::now();
         last_done = done;
-        let _ = save_meta(&meta_path, &state.url, size, &done_snapshot, &meta_snapshot);
+        if last_meta_save.elapsed() >= Duration::from_secs(2)
+            || done >= size
+            || cancel.load(Ordering::Relaxed)
+        {
+            let _ = save_meta(&meta_path, &state, size, &done_snapshot, &meta_snapshot);
+            last_meta_save = Instant::now();
+        }
         if done >= size {
             finished = true;
             break;
@@ -896,8 +1146,32 @@ fn run(
     for h in handles {
         let _ = h.join();
     }
-    let done = state.done.load(Ordering::Relaxed).min(size);
-    if finished || done >= size {
+    let (done, bounds, all_complete) = {
+        let meta = chunks_meta.lock().unwrap();
+        let dv = chunk_done.lock().unwrap();
+        let mut total = 0u64;
+        let mut complete = true;
+        for (i, (s, e)) in meta.iter().enumerate() {
+            let size_i = e.saturating_sub(*s) + 1;
+            let d = dv
+                .get(i)
+                .map(|c| c.load(Ordering::Relaxed))
+                .unwrap_or(0)
+                .min(size_i);
+            total = total.saturating_add(d);
+            if d < size_i {
+                complete = false;
+            }
+        }
+        (
+            total.min(size),
+            meta.iter().map(|(s, e)| (*s, *e)).collect::<Vec<_>>(),
+            complete,
+        )
+    };
+    state.done.store(done, Ordering::Relaxed);
+    let coverage_ok = validate_coverage(&bounds, size).is_ok();
+    if (finished || done >= size) && all_complete && coverage_ok {
         let _ = file.sync_all();
         drop(file);
         if fs::rename(&data_path, &final_path).is_ok() {
@@ -916,14 +1190,27 @@ fn run(
         task.finish("error", json!({"error": msg}));
         return;
     }
-    // 暂停/取消
+    // 走到这里说明还有分块没写完，或分段覆盖校验失败：保留临时文件和元数据。
     let stopped = cancel.load(Ordering::Relaxed);
-    *state.status.lock().unwrap() = if stopped { "paused" } else { "error" }.into();
-    if !stopped {
-        *state.error.lock().unwrap() = Some("下载未完成：连接中断".into());
+    let final_done_vec = chunk_done.lock().unwrap();
+    let _ = save_meta(&meta_path, &state, size, &final_done_vec, &bounds);
+    if stopped {
+        *state.status.lock().unwrap() = "paused".into();
+        task.finish(
+            "paused",
+            json!({"done": done, "size": size, "path": data_path.to_string_lossy()}),
+        );
+        return;
     }
+    let msg = if !all_complete || !coverage_ok {
+        format!("下载完整性校验失败（{}/{} 字节），已保留分块，可继续断点续传", done, size)
+    } else {
+        "下载未完成：连接中断".to_string()
+    };
+    *state.status.lock().unwrap() = "error".into();
+    *state.error.lock().unwrap() = Some(msg);
     task.finish(
-        if stopped { "paused" } else { "error" },
+        "error",
         json!({"done": done, "size": size, "path": data_path.to_string_lossy()}),
     );
 }
@@ -956,8 +1243,9 @@ fn resolve_url(base: &str, rel: &str) -> String {
     if rel.starts_with("//") {
         return format!("{}:{}", base.split("://").next().unwrap_or("https"), rel);
     }
-    let scheme = base.split("://").next().unwrap_or("https");
-    let rest = base.splitn(2, "://").nth(1).unwrap_or("");
+    let (scheme, rest) = base
+        .split_once("://")
+        .unwrap_or(("https", base.trim_start_matches("https://")));
     let authority = rest.split('/').next().unwrap_or("");
     if rel.starts_with('/') {
         return format!("{}://{}{}", scheme, authority, rel);
@@ -983,7 +1271,7 @@ fn fetch_bytes(
     if let Some((s, e)) = range {
         req.headers.push(("Range".into(), format!("bytes={}-{}", s, e)));
     }
-    let mut r = send(&req, cache)?;
+    let r = send(&req, cache)?;
     if r.status != 200 && r.status != 206 {
         return Err(format!("HTTP {} ({})", r.status, url));
     }
@@ -1060,7 +1348,11 @@ fn hls_parts(
     headers: &[(String, String)],
     bind_ip: Option<IpAddr>,
     bind_if: &str,
+    depth: u8,
 ) -> Result<Vec<StreamPart>, String> {
+    if depth > 4 {
+        return Err("HLS 主清单嵌套过深".into());
+    }
     let text = fetch_text(playlist, cache, headers, bind_ip, bind_if)?;
     let mut lines = text.lines().map(|s| s.trim()).filter(|s| !s.is_empty()).peekable();
     // 主清单：选择带宽最高的子清单。
@@ -1082,7 +1374,7 @@ fn hls_parts(
             i += 1;
         }
         let child = best.map(|(_, u)| u).ok_or("HLS 主清单没有子清单")?;
-        return hls_parts(&child, &child, cache, headers, bind_ip, bind_if);
+        return hls_parts(&child, &child, cache, headers, bind_ip, bind_if, depth + 1);
     }
     let mut seq = 0u64;
     let mut key_uri: Option<String> = None;
@@ -1090,6 +1382,7 @@ fn hls_parts(
     let mut key_iv: Option<[u8; 16]> = None;
     let mut map_part: Option<StreamPart> = None;
     let mut pending_range: Option<(u64, u64)> = None;
+    let mut last_range_end: Option<u64> = None;
     let mut parts = Vec::new();
     for line in text.lines().map(|s| s.trim()) {
         if let Some(v) = line.strip_prefix("#EXT-X-MEDIA-SEQUENCE:") {
@@ -1126,14 +1419,21 @@ fn hls_parts(
                 });
             }
         } else if let Some(v) = line.strip_prefix("#EXT-X-BYTERANGE:") {
-            let (n, o) = v.split_once('@').unwrap_or((v, "0"));
-            if let (Ok(n), Ok(o)) = (n.trim().parse::<u64>(), o.trim().parse::<u64>()) {
-                pending_range = Some((o, o + n.saturating_sub(1)));
+            let (n, o) = v.split_once('@').unwrap_or((v, ""));
+            if let Ok(n) = n.trim().parse::<u64>() {
+                let offset = if o.trim().is_empty() {
+                    last_range_end.map(|e| e + 1).unwrap_or(0)
+                } else {
+                    o.trim().parse::<u64>().unwrap_or(0)
+                };
+                pending_range = Some((offset, offset + n.saturating_sub(1)));
             }
         } else if !line.starts_with('#') {
             let url = resolve_url(base, line);
             let key = key_bytes.clone().map(|k| (k, key_iv.unwrap_or(seq_iv(seq))));
-            parts.push(StreamPart { url, range: pending_range.take(), key });
+            let range = pending_range.take();
+            last_range_end = range.map(|(_, e)| e);
+            parts.push(StreamPart { url, range, key });
             seq = seq.wrapping_add(1);
         }
     }
@@ -1176,6 +1476,11 @@ fn iso_duration_secs(s: &str) -> Option<f64> {
     if total > 0.0 { Some(total) } else { None }
 }
 
+fn number_width_re() -> &'static regex::Regex {
+    static RE: OnceLock<regex::Regex> = OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"\$Number%0(\d+)d\$").unwrap())
+}
+
 fn dash_parts(
     mpd_url: &str,
     cache: &ResolveCache,
@@ -1184,95 +1489,148 @@ fn dash_parts(
     bind_if: &str,
 ) -> Result<Vec<StreamPart>, String> {
     let text = fetch_text(mpd_url, cache, headers, bind_ip, bind_if)?;
-    // 选码率最高的 Representation；找不到时退回整个 MPD。
-    let mut best: Option<(u64, String)> = None;
+    // 选码率最高的 Representation，并记录它在 MPD 中的位置，
+    // 以便同时读取 Representation / AdaptationSet 两级继承的属性。
+    let mut best: Option<(u64, usize, usize)> = None;
     if let Ok(re) = regex::Regex::new(r#"<Representation\b[^>]*>"#) {
         for m in re.find_iter(&text) {
             let attrs = xml_attrs(m.as_str());
             let bw = attrs.get("bandwidth").and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
-            let start = m.end();
-            let end = text[start..].find("</Representation>").map(|e| start + e).unwrap_or(text.len());
-            let block = &text[m.start()..end];
-            if best.as_ref().map(|(b, _)| bw > *b).unwrap_or(true) {
-                best = Some((bw, block.to_string()));
+            let start = m.start();
+            let end = text[m.end()..]
+                .find("</Representation>")
+                .map(|e| m.end() + e + "</Representation>".len())
+                .unwrap_or(text.len());
+            if best.as_ref().map(|(b, _, _)| bw > *b).unwrap_or(true) {
+                best = Some((bw, start, end));
             }
         }
     }
-    let block = best.map(|(_, b)| b).unwrap_or_else(|| text.clone());
-    let base_url = regex::Regex::new(r#"<BaseURL>(.*?)</BaseURL>"#)
-        .ok()
-        .and_then(|re| re.captures(&block).map(|c| c[1].trim().to_string()))
+    let (rep_block, adapt_block): (&str, &str) = match best {
+        Some((_, s, e)) => {
+            let adapt_start = text[..s].rfind("<AdaptationSet").unwrap_or(0);
+            let adapt_end = text[e..]
+                .find("</AdaptationSet>")
+                .map(|x| e + x + "</AdaptationSet>".len())
+                .unwrap_or(text.len());
+            (&text[s..e], &text[adapt_start..adapt_end])
+        }
+        None => (&text[..], &text[..]),
+    };
+    let base_re = regex::Regex::new(r#"<BaseURL>(.*?)</BaseURL>"#).ok();
+    let find_base = |block: &str| -> Option<String> {
+        base_re
+            .as_ref()
+            .and_then(|re| re.captures(block).map(|c| c[1].trim().to_string()))
+    };
+    let base_raw = find_base(rep_block)
+        .or_else(|| find_base(adapt_block))
+        .or_else(|| find_base(&text));
+    let base_url = base_raw
         .map(|u| resolve_url(mpd_url, &u))
         .unwrap_or_else(|| mpd_url.to_string());
+
     let mut parts = Vec::new();
-    if let Ok(re) = regex::Regex::new(r#"<Initialization\b[^>]*>"#) {
-        if let Some(c) = re.captures(&block) {
-            let attrs = xml_attrs(c.get(0).map(|m| m.as_str()).unwrap_or(""));
-            if let Some(u) = attrs.get("sourceurl") {
-                parts.push(StreamPart { url: resolve_url(&base_url, u), range: None, key: None });
-            }
+    let find_tag = |block: &str, pattern: &str| -> Option<String> {
+        regex::Regex::new(pattern)
+            .ok()
+            .and_then(|re| re.captures(block).map(|c| c.get(0).unwrap().as_str().to_string()))
+    };
+    // 初始化段：Representation > AdaptationSet > 整个 MPD。
+    let init_tag = find_tag(rep_block, r#"<Initialization\b[^>]*>"#)
+        .or_else(|| find_tag(adapt_block, r#"<Initialization\b[^>]*>"#))
+        .or_else(|| find_tag(&text, r#"<Initialization\b[^>]*>"#));
+    if let Some(tag) = init_tag.as_deref() {
+        let attrs = xml_attrs(tag);
+        if let Some(u) = attrs.get("sourceurl") {
+            let range = attrs.get("range").and_then(|v| parse_byte_range(v));
+            parts.push(StreamPart { url: resolve_url(&base_url, u), range, key: None });
         }
     }
-    if let Ok(re) = regex::Regex::new(r#"<SegmentURL\b[^>]*>"#) {
-        for c in re.captures_iter(&block) {
-            let attrs = xml_attrs(c.get(0).map(|m| m.as_str()).unwrap_or(""));
-            if let Some(u) = attrs.get("media") {
-                parts.push(StreamPart { url: resolve_url(&base_url, u), range: None, key: None });
-            }
-        }
-    }
-    if parts.is_empty() {
-        if let Ok(re) = regex::Regex::new(r#"<SegmentTemplate\b[^>]*>"#) {
-            if let Some(c) = re.captures(&block) {
+    // SegmentList：支持 mediaRange。
+    let segment_urls = regex::Regex::new(r#"<SegmentURL\b[^>]*>"#).ok();
+    if let Some(re) = segment_urls.as_ref() {
+        for block in [rep_block, adapt_block] {
+            for c in re.captures_iter(block) {
                 let attrs = xml_attrs(c.get(0).map(|m| m.as_str()).unwrap_or(""));
-                let media = attrs.get("media").cloned().unwrap_or_default();
-                let init = attrs.get("initialization").cloned().unwrap_or_default();
-                let start_number = attrs.get("startnumber").and_then(|v| v.parse::<u64>().ok()).unwrap_or(1);
-                let timescale = attrs.get("timescale").and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0);
-                let seg_dur = attrs.get("duration").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
-                let total_secs = regex::Regex::new(r#"mediaPresentationDuration="([^"]+)""#)
-                    .ok()
-                    .and_then(|re| re.captures(&text).map(|c| c[1].to_string()))
-                    .and_then(|s| iso_duration_secs(&s))
-                    .unwrap_or(0.0);
-                let count = if seg_dur > 0.0 && total_secs > 0.0 {
-                    ((total_secs * timescale / seg_dur).ceil() as u64).max(1).min(100000)
-                } else { 1 };
-                let rep_id = regex::Regex::new(r#"<Representation\b[^>]*id="([^"]+)""#)
-                    .ok()
-                    .and_then(|re| re.captures(&block).map(|c| c[1].to_string()))
-                    .unwrap_or_default();
-                let bandwidth = regex::Regex::new(r#"<Representation\b[^>]*bandwidth="([^"]+)""#)
-                    .ok()
-                    .and_then(|re| re.captures(&block).map(|c| c[1].to_string()))
-                    .unwrap_or_default();
-                if !init.is_empty() {
-                    parts.push(StreamPart { url: resolve_url(&base_url, &init), range: None, key: None });
+                if let Some(u) = attrs.get("media") {
+                    parts.push(StreamPart {
+                        url: resolve_url(&base_url, u),
+                        range: attrs.get("mediarange").and_then(|v| parse_byte_range(v)),
+                        key: None,
+                    });
                 }
-                for n in start_number..(start_number + count) {
-                    let mut u = media.clone();
-                    u = u.replace("$RepresentationID$", &rep_id).replace("$Bandwidth$", &bandwidth);
-                    if let Ok(re) = regex::Regex::new(r#"\$Number%0(\d+)d\$"#) {
-                        if let Some(c) = re.captures(&u) {
-                            let w: usize = c[1].parse().unwrap_or(0);
-                            let formatted = format!("{:0width$}", n, width = w);
-                            u = re.replace_all(&u, formatted.as_str()).to_string();
-                        }
-                    }
-                    u = u.replace("$Number$", &n.to_string());
-                    if u.contains('$') {
-                        // 未知模板变量（如 $Time$）不做猜测，交给服务端/后续实现。
-                        continue;
-                    }
-                    parts.push(StreamPart { url: resolve_url(&base_url, &u), range: None, key: None });
+            }
+            if !parts.is_empty() {
+                break;
+            }
+        }
+    }
+    // SegmentTemplate：Representation > AdaptationSet > MPD。
+    if parts.is_empty() {
+        let template_tag = find_tag(rep_block, r#"<SegmentTemplate\b[^>]*>"#)
+            .or_else(|| find_tag(adapt_block, r#"<SegmentTemplate\b[^>]*>"#))
+            .or_else(|| find_tag(&text, r#"<SegmentTemplate\b[^>]*>"#));
+        if let Some(tag) = template_tag {
+            let attrs = xml_attrs(&tag);
+            let media = attrs.get("media").cloned().unwrap_or_default();
+            let init = attrs.get("initialization").cloned().unwrap_or_default();
+            if media.contains("$Time$") {
+                return Err("DASH $Time$ 模板暂不支持".into());
+            }
+            let start_number = attrs.get("startnumber").and_then(|v| v.parse::<u64>().ok()).unwrap_or(1);
+            let timescale = attrs.get("timescale").and_then(|v| v.parse::<f64>().ok()).unwrap_or(1.0);
+            let seg_dur = attrs.get("duration").and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.0);
+            let total_secs = regex::Regex::new(r#"mediaPresentationDuration="([^"]+)""#)
+                .ok()
+                .and_then(|re| re.captures(&text).map(|c| c[1].to_string()))
+                .and_then(|s| iso_duration_secs(&s))
+                .unwrap_or(0.0);
+            let count = if seg_dur > 0.0 && total_secs > 0.0 {
+                ((total_secs * timescale / seg_dur).ceil() as u64).clamp(1, 20000)
+            } else {
+                1
+            };
+            let rep_attrs = regex::Regex::new(r#"<Representation\b[^>]*>"#)
+                .ok()
+                .and_then(|re| re.captures(rep_block).map(|c| xml_attrs(c.get(0).unwrap().as_str())))
+                .unwrap_or_default();
+            let rep_id = rep_attrs.get("id").cloned().unwrap_or_default();
+            let bandwidth = rep_attrs.get("bandwidth").cloned().unwrap_or_default();
+            if !init.is_empty() {
+                parts.push(StreamPart {
+                    url: resolve_url(&base_url, &init),
+                    range: attrs.get("initializationrange").and_then(|v| parse_byte_range(v)),
+                    key: None,
+                });
+            }
+            for n in start_number..(start_number + count) {
+                let mut u = media.clone();
+                u = u
+                    .replace("$RepresentationID$", &rep_id)
+                    .replace("$Bandwidth$", &bandwidth);
+                if let Some(c) = number_width_re().captures(&u) {
+                    let w: usize = c[1].parse().unwrap_or(0);
+                    let formatted = format!("{:0width$}", n, width = w);
+                    u = number_width_re().replace_all(&u, formatted.as_str()).to_string();
                 }
+                u = u.replace("$Number$", &n.to_string());
+                if u.contains('$') {
+                    return Err("DASH 模板包含暂不支持的变量".into());
+                }
+                parts.push(StreamPart { url: resolve_url(&base_url, &u), range: None, key: None });
             }
         }
     }
     if parts.is_empty() {
-        parts.push(StreamPart { url: base_url, range: None, key: None });
+        return Err("DASH 清单中未找到可下载分片（缺少 SegmentList/SegmentTemplate）".into());
     }
     Ok(parts)
+}
+
+fn parse_byte_range(v: &str) -> Option<(u64, u64)> {
+    let (a, b) = v.trim().split_once('-')?;
+    Some((a.trim().parse().ok()?, b.trim().parse().ok()?))
 }
 
 fn decrypt_hls(mut data: Vec<u8>, key: &[u8], iv: &[u8; 16]) -> Result<Vec<u8>, String> {
@@ -1299,13 +1657,13 @@ fn run_manifest(
     data_path: PathBuf,
     meta_path: PathBuf,
     final_path: PathBuf,
-) -> () {
+) {
     *state.status.lock().unwrap() = "running".into();
     *state.kind.lock().unwrap() = if hls { "hls" } else { "dash" }.into();
     task.set_status("running");
     task.emit(json!({"type":"manifest","kind": if hls {"hls"} else {"dash"}, "url": state.url}));
     let parts = if hls {
-        hls_parts(&state.url, &state.url, &cache, &headers, bind_ip, &bind_if)
+        hls_parts(&state.url, &state.url, &cache, &headers, bind_ip, &bind_if, 0)
     } else {
         dash_parts(&state.url, &cache, &headers, bind_ip, &bind_if)
     };
@@ -1337,7 +1695,14 @@ fn run_manifest(
         if task.is_cancelled() {
             break;
         }
-        let r = fetch_bytes(&p.url, &cache, &headers, bind_ip, &bind_if, p.range);
+        let mut r = Err("未开始".to_string());
+        for attempt in 0..3 {
+            r = fetch_bytes(&p.url, &cache, &headers, bind_ip, &bind_if, p.range);
+            if r.is_ok() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(250 * (attempt + 1)));
+        }
         match r {
             Ok(mut bytes) => {
                 if let Some((key, iv)) = &p.key {
@@ -1411,18 +1776,36 @@ fn build_display_cells(
     if bounds.is_empty() {
         return Vec::new();
     }
-    let cells = max_cells.max(1).min(bounds.len());
+    // 运行时分段拆分后 chunks_meta 不再按起点排序；展示前先排序。
+    let mut items: Vec<(u64, u64, u64)> = bounds
+        .iter()
+        .enumerate()
+        .map(|(i, (s, e))| {
+            (
+                *s,
+                *e,
+                done.get(i)
+                    .copied()
+                    .unwrap_or(0)
+                    .min(e.saturating_sub(*s) + 1),
+            )
+        })
+        .collect();
+    items.sort_by_key(|(s, _, _)| *s);
+    let cells = max_cells.max(1).min(items.len());
     let mut out = Vec::with_capacity(cells);
     for cell in 0..cells {
-        let from = cell * bounds.len() / cells;
-        let to = ((cell + 1) * bounds.len() / cells).max(from + 1).min(bounds.len());
-        if from >= bounds.len() {
+        let from = cell * items.len() / cells;
+        let to = ((cell + 1) * items.len() / cells)
+            .max(from + 1)
+            .min(items.len());
+        if from >= items.len() {
             break;
         }
-        let s = bounds[from].0;
-        let e = bounds[to - 1].1;
+        let s = items[from].0;
+        let e = items[to - 1].1;
         let d: u64 = (from..to)
-            .map(|i| done.get(i).copied().unwrap_or(0))
+            .map(|i| items[i].2)
             .sum::<u64>()
             .min(e.saturating_sub(s) + 1);
         out.push((s, e, d, (to - from) as u64));
@@ -1432,7 +1815,7 @@ fn build_display_cells(
 
 fn save_meta(
     path: &Path,
-    url: &str,
+    state: &DlState,
     size: u64,
     chunk_done: &[Arc<AtomicU64>],
     chunks: &[(u64, u64)],
@@ -1443,12 +1826,36 @@ fn save_meta(
         .map(|(i, (s, e))| {
             json!({
                 "start": s, "end": e,
-                "done": chunk_done[i].load(Ordering::Relaxed).min(e - s + 1)
+                "done": chunk_done
+                    .get(i)
+                    .map(|c| c.load(Ordering::Relaxed))
+                    .unwrap_or(0)
+                    .min(e - s + 1)
             })
         })
         .collect();
-    let text = json!({"url": url, "size": size, "chunks": arr}).to_string();
-    fs::write(path, text).map_err(|e| e.to_string())
+    // 只保存续传必需的非敏感参数；Cookie/Authorization 始终留在应用私有状态里。
+    let text = json!({
+        "version": 2,
+        "url": state.url,
+        "name": state.name,
+        "size": size,
+        "etag": state.etag.lock().unwrap().clone(),
+        "last_modified": state.last_modified.lock().unwrap().clone(),
+        "connections": state.connections,
+        "block_kb": state.block_kb,
+        "retries": state.retries,
+        "mirrors": state.mirrors,
+        "dns": state.dns,
+        "data_file": state.data_path.lock().unwrap().to_string_lossy(),
+        "chunk_size": state.chunk_size.load(Ordering::Relaxed),
+        "updated": now_secs(),
+        "chunks": arr,
+    })
+    .to_string();
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, text).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1463,18 +1870,19 @@ fn download_chunk(
     file: &Arc<File>,
     chunk_done: &AtomicU64,
     limit: &AtomicU64,
-    total_done: &AtomicU64,
     cancel: &Arc<AtomicBool>,
-    task: &Arc<Task>,
     supports_range: bool,
     worker: &Arc<WorkerStat>,
     bind_ip: Option<IpAddr>,
     bind_if: &str,
+    conn_cap: &AtomicUsize,
 ) -> Result<(), String> {
     let mut last_err = String::new();
+    // 非 Range 模式无法从中间续传：每次重试都从头写，进度也必须归零。
     let mut offset = if supports_range {
         chunk_done.load(Ordering::Relaxed)
     } else {
+        chunk_done.store(0, Ordering::Relaxed);
         0
     };
     let effective_end = end.min(limit.load(Ordering::Relaxed));
@@ -1486,6 +1894,8 @@ fn download_chunk(
     for attempt in 0..=retries {
         let entry = &pool[(worker_idx + attempt as usize) % pool.len().max(1)];
         let mut req = build_req("GET", &entry.url, headers);
+        // 用户自定义 Range 会破坏分段调度，统一忽略。
+        req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("range"));
         req.bind_ip = bind_ip;
         req.bind_if = bind_if.to_string();
         req.pin_ip = entry.ip.parse().ok();
@@ -1503,6 +1913,19 @@ fn download_chunk(
         *worker.cdn.lock().unwrap() = entry.url.clone();
         match send(&req, cache) {
             Ok(r) => {
+                if r.status == 403 || r.status == 429 {
+                    // 服务器拒绝多连接：下调并发上限，避免继续触发风控。
+                    loop {
+                        let v = conn_cap.load(Ordering::Relaxed);
+                        let next = (v / 2).max(1);
+                        if conn_cap
+                            .compare_exchange(v, next, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                        {
+                            break;
+                        }
+                    }
+                }
                 if supports_range && r.status == 206 {
                     if let Some(cr) = r.header("content-range") {
                         let expected = start + offset;
@@ -1526,7 +1949,7 @@ fn download_chunk(
             Err(e) => last_err = format!("{} ({})", e, entry.url),
         }
     }
-    let mut resp = resp.ok_or_else(|| last_err)?;
+    let mut resp = resp.ok_or(last_err)?;
     if supports_range && resp.status != 206 {
         return Err(format!("服务器未按 Range 返回: HTTP {}", resp.status));
     }
@@ -1554,19 +1977,32 @@ fn download_chunk(
         if n == 0 {
             break;
         }
+        // 取消后不再写入，避免旧任务在暂停/继续切换时与新任务竞争。
+        if cancel.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        // 读操作期间分段可能被 supervisor 拆小：写之前重新取上界并裁剪，
+        // 保证不会写到新分段的区间，也不会重复计数。
+        let cap_now = end.min(limit.load(Ordering::Relaxed));
+        let allowed = (cap_now.saturating_sub(start + offset) + 1).min(n as u64) as usize;
+        if allowed == 0 {
+            break;
+        }
         let write_at = start + offset;
-        file.write_at(&buf[..n], write_at).map_err(|e| e.to_string())?;
-        offset += n as u64;
+        file.write_at(&buf[..allowed], write_at)
+            .map_err(|e| e.to_string())?;
+        offset += allowed as u64;
         chunk_done.store(offset, Ordering::Relaxed);
-        total_done.fetch_add(n as u64, Ordering::Relaxed);
-        worker.bytes.fetch_add(n as u64, Ordering::Relaxed);
+        worker.bytes.fetch_add(allowed as u64, Ordering::Relaxed);
+        if allowed < n {
+            break;
+        }
     }
     let final_end = end.min(limit.load(Ordering::Relaxed));
     let expected = final_end.saturating_sub(start) + 1;
     if offset < expected {
         return Err(format!("分段未完成 {}/{}", offset, expected));
     }
-    let _ = task;
     Ok(())
 }
 
@@ -1668,15 +2104,11 @@ pub fn scan(args: &Value) -> Value {
             if !fname.starts_with('.') || !fname.ends_with(".pmdown.json") {
                 continue;
             }
-            let name = fname
+            let stem = fname
                 .trim_start_matches('.')
                 .trim_end_matches(".pmdown.json")
                 .to_string();
-            if name.is_empty() {
-                continue;
-            }
-            let data_path = Path::new(dir).join(format!(".{}.pmdown", name));
-            if !data_path.is_file() {
+            if stem.is_empty() {
                 continue;
             }
             let text = match fs::read_to_string(&path) {
@@ -1687,6 +2119,26 @@ pub fn scan(args: &Value) -> Value {
                 Ok(v) => v,
                 Err(_) => continue,
             };
+            let name = meta["name"]
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    // 新格式为 name.<16位hash>；旧格式只有 name。
+                    let mut s = stem.as_str();
+                    if let Some((head, tail)) = s.rsplit_once('.') {
+                        if tail.len() == 16 && tail.chars().all(|c| c.is_ascii_hexdigit()) {
+                            s = head;
+                        }
+                    }
+                    s.to_string()
+                });
+            let data_path = meta["data_file"]
+                .as_str()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| Path::new(dir).join(format!(".{}.pmdown", name)));
+            if !data_path.is_file() {
+                continue;
+            }
             let url = meta["url"].as_str().unwrap_or("").to_string();
             if url.is_empty() {
                 continue;
@@ -1697,7 +2149,10 @@ pub fn scan(args: &Value) -> Value {
             if let Some(arr) = meta["chunks"].as_array() {
                 chunk_total = arr.len() as u64;
                 for c in arr {
-                    done = done.saturating_add(c["done"].as_u64().unwrap_or(0));
+                    let s = c["start"].as_u64().unwrap_or(0);
+                    let e = c["end"].as_u64().unwrap_or(s);
+                    let d = c["done"].as_u64().unwrap_or(0).min(e.saturating_sub(s) + 1);
+                    done = done.saturating_add(d);
                 }
             }
             if size == 0 {
@@ -1712,6 +2167,8 @@ pub fn scan(args: &Value) -> Value {
                 .unwrap_or(0);
             items.push(json!({
                 "id": format!("local:{}", path.to_string_lossy()),
+                "data_file": data_path.to_string_lossy(),
+                "meta_file": path.to_string_lossy(),
                 "url": url,
                 "name": name,
                 "dir": dir,
@@ -1720,12 +2177,13 @@ pub fn scan(args: &Value) -> Value {
                 "mbps": 0,
                 "status": "paused",
                 "error": "",
-                "mirrors": [],
+                "mirrors": meta["mirrors"].as_array().cloned().unwrap_or_default(),
                 "headers": {},
-                "dns": [],
-                "connections": 8,
-                "block_kb": 1024,
-                "retries": 2,
+                "dns": meta["dns"].as_array().cloned().unwrap_or_default(),
+                "connections": meta["connections"].as_u64().unwrap_or(8),
+                "block_kb": meta["block_kb"].as_u64().unwrap_or(0),
+                "retries": meta["retries"].as_u64().unwrap_or(2),
+                "etag": meta["etag"].clone(),
                 "kind": "http",
                 "chunk_total": chunk_total,
                 "parts_total": 0,
@@ -1747,13 +2205,97 @@ pub fn delete(args: &Value) -> Result<Value, String> {
         .unwrap()
         .remove(id)
         .ok_or_else(|| "任务不存在".to_string())?;
+    release_target(&state.target_key);
     let task = crate::get_task(id).ok();
-    if let Some(t) = task {
+    if let Some(t) = task.as_ref() {
         t.cancel.store(true, Ordering::Relaxed);
+        if remove_files {
+            state.delete_on_exit.store(true, Ordering::Relaxed);
+            let terminal = matches!(
+                state.status.lock().unwrap().as_str(),
+                "done" | "error" | "paused" | "cancelled"
+            );
+            if terminal {
+                let _ = fs::remove_file(state.data_path.lock().unwrap().clone());
+                let _ = fs::remove_file(state.meta_path.lock().unwrap().clone());
+            }
+        }
     }
-    if remove_files {
-        let _ = fs::remove_file(state.data_path.lock().unwrap().clone());
-        let _ = fs::remove_file(state.meta_path.lock().unwrap().clone());
-    }
+    crate::tasks().lock().unwrap().remove(id);
     Ok(json!({"id": id, "removed": true}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_handles_multibyte_names() {
+        let name = "第1集 ".to_string() + &"中".repeat(200) + ".mp4";
+        let out = sanitize(&name);
+        assert!(!out.is_empty());
+        assert!(out.chars().count() <= 80);
+        // 不能 panic，也不能产生替换字符。
+        assert!(!out.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn sanitize_strips_separators_and_dots() {
+        assert_eq!(sanitize("../../etc/passwd"), "_.._etc_passwd");
+        assert_eq!(sanitize("..."), "download.bin");
+        assert_eq!(sanitize(""), "download.bin");
+    }
+
+    #[test]
+    fn name_from_url_decodes_percent() {
+        assert_eq!(name_from_url("https://a.test/%E4%B8%AD%E6%96%87.zip?x=1"), "中文.zip");
+        assert_eq!(
+            name_from_url("https://speed.cloudflare.com/__down?bytes=1"),
+            "netpulse_download.bin"
+        );
+    }
+
+    #[test]
+    fn coverage_validation() {
+        assert!(validate_coverage(&[(0, 9)], 10).is_ok());
+        assert!(validate_coverage(&[(0, 4), (5, 9)], 10).is_ok());
+        assert!(validate_coverage(&[(0, 4), (6, 9)], 10).is_err());
+        assert!(validate_coverage(&[(0, 5), (5, 9)], 10).is_err());
+        assert!(validate_coverage(&[(1, 9)], 10).is_err());
+        assert!(validate_coverage(&[(0, 8)], 10).is_err());
+    }
+
+    #[test]
+    fn byte_range_parsing() {
+        assert_eq!(parse_byte_range("0-1023"), Some((0, 1023)));
+        assert_eq!(parse_byte_range("bad"), None);
+    }
+
+    #[test]
+    fn resolve_relative_urls() {
+        let base = "https://cdn.test/a/b/index.m3u8";
+        assert_eq!(resolve_url(base, "seg.ts"), "https://cdn.test/a/b/seg.ts");
+        assert_eq!(resolve_url(base, "/root.ts"), "https://cdn.test/root.ts");
+        assert_eq!(resolve_url(base, "//other.test/x"), "https://other.test/x");
+    }
+
+    #[test]
+    fn hls_attr_parsing() {
+        let attrs = hls_attrs("METHOD=AES-128,URI=\"key.bin\",IV=0x0102");
+        assert_eq!(attrs.get("METHOD").map(String::as_str), Some("AES-128"));
+        assert_eq!(attrs.get("URI").map(String::as_str), Some("key.bin"));
+        assert!(hex16("000102030405060708090a0b0c0d0e0f").is_some());
+        assert!(hex16("00").is_none());
+    }
+
+    #[test]
+    fn unique_name_avoids_overwrite() {
+        let dir = std::env::temp_dir().join(format!("netpulse-test-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let file = dir.join("a.zip");
+        fs::write(&file, b"x").unwrap();
+        let next = unique_final_name(&dir, "a.zip");
+        assert_eq!(next, "a (1).zip");
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
