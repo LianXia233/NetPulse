@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="light">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -9,6 +9,29 @@
   
   <style>
     :root {
+      --bg: #f8f9fc;
+      --bg-card: rgba(255, 255, 255, 0.88);
+      --bg-card-hover: rgba(255, 255, 255, 0.98);
+      --border: rgba(0, 0, 0, 0.08);
+      --border-focus: rgba(0, 122, 255, 0.4);
+      --text: #1d1d1f;
+      --text-muted: #6e6e73;
+      --primary: #007aff;
+      --primary-glow: rgba(0, 122, 255, 0.25);
+      --accent-green: #34c759;
+      --accent-purple: #cb30e0;
+      --accent-orange: #ff9500;
+      --accent-red: #ff3b30;
+      --card-shadow: 0 4px 20px rgba(0, 0, 0, 0.04);
+      --card-shadow-hover: 0 16px 36px rgba(0, 122, 255, 0.08), 0 4px 12px rgba(0, 0, 0, 0.04);
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      --radius-sm: 10px;
+      --radius-md: 18px;
+      --radius-lg: 26px;
+      --radius-full: 9999px;
+    }
+
+    [data-theme="dark"] {
       --bg: #090a0f;
       --bg-card: rgba(18, 20, 29, 0.75);
       --bg-card-hover: rgba(26, 30, 44, 0.85);
@@ -18,27 +41,8 @@
       --text-muted: #8e8e93;
       --primary: #007aff;
       --primary-glow: rgba(0, 122, 255, 0.35);
-      --accent-green: #34c759;
-      --accent-purple: #cb30e0;
-      --accent-orange: #ff9500;
-      --accent-red: #ff3b30;
-      --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-      --radius-sm: 10px;
-      --radius-md: 18px;
-      --radius-lg: 26px;
-      --radius-full: 9999px;
-    }
-
-    [data-theme="light"] {
-      --bg: #f8f9fc;
-      --bg-card: rgba(255, 255, 255, 0.85);
-      --bg-card-hover: rgba(255, 255, 255, 0.95);
-      --border: rgba(0, 0, 0, 0.08);
-      --border-focus: rgba(0, 122, 255, 0.4);
-      --text: #1d1d1f;
-      --text-muted: #6e6e73;
-      --primary: #007aff;
-      --primary-glow: rgba(0, 122, 255, 0.2);
+      --card-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+      --card-shadow-hover: 0 20px 40px rgba(0, 0, 0, 0.4);
     }
 
     * {
@@ -76,7 +80,7 @@
       left: 15%;
       width: 600px;
       height: 600px;
-      background: radial-gradient(circle, rgba(0, 122, 255, 0.18) 0%, rgba(0, 122, 255, 0) 70%);
+      background: radial-gradient(circle, rgba(0, 122, 255, 0.12) 0%, rgba(0, 122, 255, 0) 70%);
       filter: blur(80px);
     }
     .ambient-glow::after {
@@ -86,8 +90,14 @@
       right: 15%;
       width: 500px;
       height: 500px;
-      background: radial-gradient(circle, rgba(203, 48, 224, 0.15) 0%, rgba(203, 48, 224, 0) 70%);
+      background: radial-gradient(circle, rgba(203, 48, 224, 0.08) 0%, rgba(203, 48, 224, 0) 70%);
       filter: blur(90px);
+    }
+    [data-theme="dark"] .ambient-glow::before {
+      background: radial-gradient(circle, rgba(0, 122, 255, 0.18) 0%, rgba(0, 122, 255, 0) 70%);
+    }
+    [data-theme="dark"] .ambient-glow::after {
+      background: radial-gradient(circle, rgba(203, 48, 224, 0.15) 0%, rgba(203, 48, 224, 0) 70%);
     }
 
     /* Navigation */
@@ -101,11 +111,11 @@
       padding: 16px 32px;
       backdrop-filter: blur(20px);
       -webkit-backdrop-filter: blur(20px);
-      background: rgba(9, 10, 15, 0.65);
+      background: rgba(248, 249, 252, 0.82);
       border-bottom: 1px solid var(--border);
     }
-    [data-theme="light"] .nav {
-      background: rgba(248, 249, 252, 0.75);
+    [data-theme="dark"] .nav {
+      background: rgba(9, 10, 15, 0.7);
     }
     .nav-brand {
       display: flex;
@@ -120,14 +130,14 @@
       width: 36px;
       height: 36px;
       border-radius: 9px;
-      box-shadow: 0 4px 12px rgba(0, 122, 255, 0.3);
+      box-shadow: 0 4px 12px rgba(0, 122, 255, 0.25);
     }
     .nav-badge {
       font-size: 0.72rem;
       padding: 2px 8px;
-      background: rgba(0, 122, 255, 0.15);
+      background: rgba(0, 122, 255, 0.1);
       color: var(--primary);
-      border: 1px solid rgba(0, 122, 255, 0.3);
+      border: 1px solid rgba(0, 122, 255, 0.25);
       border-radius: var(--radius-full);
       font-weight: 600;
     }
@@ -171,11 +181,11 @@
     .btn-primary {
       background: linear-gradient(135deg, #007aff 0%, #0056cc 100%);
       color: #fff;
-      box-shadow: 0 4px 20px var(--primary-glow);
+      box-shadow: 0 4px 16px var(--primary-glow);
     }
     .btn-primary:hover {
       transform: translateY(-2px);
-      box-shadow: 0 8px 25px rgba(0, 122, 255, 0.5);
+      box-shadow: 0 8px 25px rgba(0, 122, 255, 0.4);
     }
     .btn-secondary {
       background: var(--bg-card);
@@ -185,7 +195,7 @@
     }
     .btn-secondary:hover {
       background: var(--bg-card-hover);
-      border-color: rgba(255, 255, 255, 0.2);
+      border-color: rgba(0, 122, 255, 0.3);
       transform: translateY(-2px);
     }
     .btn-theme {
@@ -196,6 +206,7 @@
       background: var(--bg-card);
       color: var(--text);
       border: 1px solid var(--border);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
     }
 
     /* Container */
@@ -216,8 +227,8 @@
       align-items: center;
       gap: 8px;
       padding: 6px 16px;
-      background: rgba(0, 122, 255, 0.1);
-      border: 1px solid rgba(0, 122, 255, 0.25);
+      background: rgba(0, 122, 255, 0.08);
+      border: 1px solid rgba(0, 122, 255, 0.2);
       border-radius: var(--radius-full);
       color: var(--primary);
       font-size: 0.85rem;
@@ -233,6 +244,11 @@
       margin-bottom: 24px;
     }
     .gradient-text {
+      background: linear-gradient(135deg, #007aff 0%, #0056cc 50%, #cb30e0 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    [data-theme="dark"] .gradient-text {
       background: linear-gradient(135deg, #00f2fe 0%, #007aff 50%, #cb30e0 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
@@ -265,10 +281,14 @@
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      padding: 4px 12px;
-      background: rgba(255, 255, 255, 0.04);
+      padding: 5px 14px;
+      background: rgba(0, 0, 0, 0.03);
       border: 1px solid var(--border);
       border-radius: var(--radius-full);
+      font-weight: 500;
+    }
+    [data-theme="dark"] .badge-chip {
+      background: rgba(255, 255, 255, 0.04);
     }
 
     /* Device & Mockup Interactive Section */
@@ -279,23 +299,34 @@
     }
     .device-shell {
       position: relative;
-      background: #151821;
-      border: 2px solid rgba(255, 255, 255, 0.15);
+      background: #ffffff;
+      border: 2px solid rgba(0, 0, 0, 0.08);
       border-radius: 44px;
       padding: 16px;
-      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 60px rgba(0, 122, 255, 0.15);
+      box-shadow: 0 24px 60px rgba(0, 122, 255, 0.12), 0 8px 24px rgba(0, 0, 0, 0.06);
       overflow: hidden;
+      transition: all 0.3s ease;
+    }
+    [data-theme="dark"] .device-shell {
+      background: #151821;
+      border: 2px solid rgba(255, 255, 255, 0.15);
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 60px rgba(0, 122, 255, 0.15);
     }
     .device-screen {
-      background: #0d0f17;
+      background: #f8f9fc;
       border-radius: 32px;
-      border: 1px solid rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(0, 0, 0, 0.06);
       padding: 28px 24px 32px;
       min-height: 480px;
       display: flex;
       flex-direction: column;
       justify-content: space-between;
       position: relative;
+      color: var(--text);
+    }
+    [data-theme="dark"] .device-screen {
+      background: #0d0f17;
+      border: 1px solid rgba(255, 255, 255, 0.05);
     }
     .screen-header {
       display: flex;
@@ -341,10 +372,15 @@
       font-size: 4rem;
       font-weight: 800;
       font-variant-numeric: tabular-nums;
-      background: linear-gradient(135deg, #00f2fe 0%, #007aff 100%);
+      background: linear-gradient(135deg, #007aff 0%, #0056cc 100%);
       -webkit-background-clip: text;
       -webkit-text-fill-color: transparent;
       line-height: 1;
+    }
+    [data-theme="dark"] .speed-number {
+      background: linear-gradient(135deg, #00f2fe 0%, #007aff 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
     }
     .speed-unit {
       font-size: 1.1rem;
@@ -359,11 +395,17 @@
       margin-top: 24px;
     }
     .speed-stat-card {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid var(--border);
+      background: #ffffff;
+      border: 1px solid rgba(0, 0, 0, 0.06);
       border-radius: var(--radius-md);
       padding: 12px;
       text-align: center;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+    }
+    [data-theme="dark"] .speed-stat-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      box-shadow: none;
     }
     .speed-stat-label {
       font-size: 0.75rem;
@@ -377,11 +419,17 @@
 
     /* View: Downloads */
     .dl-card {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid var(--border);
+      background: #ffffff;
+      border: 1px solid rgba(0, 0, 0, 0.06);
       border-radius: var(--radius-md);
       padding: 16px;
       margin-bottom: 12px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+    }
+    [data-theme="dark"] .dl-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      box-shadow: none;
     }
     .dl-title-row {
       display: flex;
@@ -409,7 +457,8 @@
     .chunk-part:nth-child(5) { animation-delay: 0.8s; }
     .chunk-part:nth-child(6) { animation-delay: 1.0s; }
     .chunk-part:nth-child(7) { animation-delay: 1.2s; }
-    .chunk-part:nth-child(8) { animation-delay: 1.4s; background: rgba(255, 255, 255, 0.1); }
+    .chunk-part:nth-child(8) { animation-delay: 1.4s; background: rgba(0, 0, 0, 0.08); }
+    [data-theme="dark"] .chunk-part:nth-child(8) { background: rgba(255, 255, 255, 0.1); }
     @keyframes pulse {
       0%, 100% { opacity: 0.6; }
       50% { opacity: 1; }
@@ -442,13 +491,18 @@
       justify-content: center;
     }
     .mockup-dock {
-      background: rgba(255, 255, 255, 0.08);
-      border: 1px solid rgba(255, 255, 255, 0.12);
+      background: #ffffff;
+      border: 1px solid rgba(0, 0, 0, 0.08);
       border-radius: var(--radius-full);
       padding: 5px;
       display: flex;
       gap: 4px;
       backdrop-filter: blur(16px);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+    }
+    [data-theme="dark"] .mockup-dock {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
       box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
     }
     .dock-btn {
@@ -466,6 +520,11 @@
       transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
     }
     .dock-btn.active {
+      background: #007aff;
+      color: #ffffff;
+      box-shadow: 0 4px 12px rgba(0, 122, 255, 0.3);
+    }
+    [data-theme="dark"] .dock-btn.active {
       background: #ffffff;
       color: #000000;
       box-shadow: 0 4px 12px rgba(255, 255, 255, 0.2);
@@ -508,15 +567,16 @@
       border-radius: var(--radius-lg);
       padding: 32px;
       backdrop-filter: blur(16px);
+      box-shadow: var(--card-shadow);
       transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
       position: relative;
       overflow: hidden;
     }
     .bento-card:hover {
       background: var(--bg-card-hover);
-      border-color: rgba(255, 255, 255, 0.18);
+      border-color: rgba(0, 122, 255, 0.25);
       transform: translateY(-4px);
-      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+      box-shadow: var(--card-shadow-hover);
     }
     .bento-col-8 { grid-column: span 8; }
     .bento-col-4 { grid-column: span 4; }
@@ -532,8 +592,8 @@
       justify-content: center;
       font-size: 1.4rem;
       margin-bottom: 20px;
-      background: rgba(0, 122, 255, 0.12);
-      border: 1px solid rgba(0, 122, 255, 0.25);
+      background: rgba(0, 122, 255, 0.08);
+      border: 1px solid rgba(0, 122, 255, 0.2);
     }
     .bento-title {
       font-size: 1.35rem;
@@ -553,6 +613,7 @@
       border-radius: var(--radius-lg);
       padding: 36px;
       margin-bottom: 100px;
+      box-shadow: var(--card-shadow);
     }
     .spec-grid {
       display: grid;
@@ -578,7 +639,7 @@
 
     .fingerprint-box {
       margin-top: 28px;
-      background: rgba(0, 0, 0, 0.35);
+      background: rgba(0, 0, 0, 0.03);
       border: 1px solid var(--border);
       border-radius: var(--radius-md);
       padding: 16px 20px;
@@ -588,6 +649,9 @@
       justify-content: space-between;
       align-items: center;
       word-break: break-all;
+    }
+    [data-theme="dark"] .fingerprint-box {
+      background: rgba(0, 0, 0, 0.35);
     }
 
     /* Footer */
@@ -768,7 +832,7 @@
             </div>
           </div>
 
-          <div class="dl-card" style="opacity: 0.85;">
+          <div class="dl-card">
             <div class="dl-title-row">
               <span>NetPulse-1.1.1.apk</span>
               <span style="color: var(--primary);">已完成</span>
@@ -851,7 +915,7 @@
       
       <!-- Card 1: Rust Core -->
       <div class="bento-card bento-col-8">
-        <div class="bento-icon" style="color: #ff9500; background: rgba(255, 149, 0, 0.12); border-color: rgba(255, 149, 0, 0.25);">⚡</div>
+        <div class="bento-icon" style="color: #ff9500; background: rgba(255, 149, 0, 0.1); border-color: rgba(255, 149, 0, 0.2);">⚡</div>
         <h3 class="bento-title">Rust 原生双核驱动 · 零 GC 极致吞吐</h3>
         <p class="bento-desc">
           所有耗时的测速打流、DNS 并发轮询、动态分块多线程写入与 TLS 协议栈，完全由自研 Rust 引擎（<code>libnetpulse_core.so</code>）在宿主直接执行。通过 JSON-over-FFI 与 110ms 增量轮询向 Flutter 上报数据。严格适配 <strong>Android 15+ 16 KB 内存页对齐</strong> 规范。
@@ -869,7 +933,7 @@
 
       <!-- Card 3: Dynamic Download Engine -->
       <div class="bento-card bento-col-6">
-        <div class="bento-icon" style="color: #34c759; background: rgba(52, 199, 89, 0.12); border-color: rgba(52, 199, 89, 0.25);">⬇️</div>
+        <div class="bento-icon" style="color: #34c759; background: rgba(52, 199, 89, 0.1); border-color: rgba(52, 199, 89, 0.2);">⬇️</div>
         <h3 class="bento-title">动态分块与慢段对半拆分算法</h3>
         <p class="bento-desc">
           支持 1–32 并发连接、64 KB–8 MB 动态分块切分。运行中遇慢速连接段自动对半拆分抢占带宽，无碎片空洞。多 CDN 镜像故障自动接管轮询，断点元数据（<code>.pmdown.json</code>）强校验。
@@ -878,7 +942,7 @@
 
       <!-- Card 4: Web Sniffer -->
       <div class="bento-card bento-col-6">
-        <div class="bento-icon" style="color: #cb30e0; background: rgba(203, 48, 224, 0.12); border-color: rgba(203, 48, 224, 0.25);">🌐</div>
+        <div class="bento-icon" style="color: #cb30e0; background: rgba(203, 48, 224, 0.1); border-color: rgba(203, 48, 224, 0.2);">🌐</div>
         <h3 class="bento-title">内置浏览器直链嗅探与鉴权透传</h3>
         <p class="bento-desc">
           基于 Android System WebView，正常浏览网页的同时自动嗅探直链。支持一键将页面 Cookie、User-Agent、Referer 及鉴权标头注入下载器，跨域自动清洗避免凭据泄漏。
@@ -887,7 +951,7 @@
 
       <!-- Card 5: Full Diagnostics -->
       <div class="bento-card bento-col-4">
-        <div class="bento-icon" style="color: #ff3b30; background: rgba(255, 59, 48, 0.12); border-color: rgba(255, 59, 48, 0.25);">🩺</div>
+        <div class="bento-icon" style="color: #ff3b30; background: rgba(255, 59, 48, 0.1); border-color: rgba(255, 59, 48, 0.2);">🩺</div>
         <h3 class="bento-title">多维网络体检工具</h3>
         <p class="bento-desc">
           TCP Ping 纳秒往返测试、DNS A/AAAA 多服务器解析横向对比、STUN NAT 穿透类型检测以及内置 <code>libiperf3.so</code> 原生打流压测。
@@ -896,7 +960,7 @@
 
       <!-- Card 6: Offline IP DB -->
       <div class="bento-card bento-col-4">
-        <div class="bento-icon" style="color: #00f2fe; background: rgba(0, 242, 254, 0.12); border-color: rgba(0, 242, 254, 0.25);">🗺️</div>
+        <div class="bento-icon" style="color: #007aff; background: rgba(0, 122, 255, 0.08); border-color: rgba(0, 122, 255, 0.2);">🗺️</div>
         <h3 class="bento-title">43 万条离线 IP 归属地</h3>
         <p class="bento-desc">
           内置 DB-IP 离线国家段种子库，零 IO 毫秒级二分匹配。支持在线 CSV/GZ 热更新原子替换，可配置自定义查询 API。
@@ -905,7 +969,7 @@
 
       <!-- Card 7: Zero Privacy Leaks -->
       <div class="bento-card bento-col-4">
-        <div class="bento-icon" style="color: #34c759; background: rgba(52, 199, 89, 0.12); border-color: rgba(52, 199, 89, 0.25);">🛡️</div>
+        <div class="bento-icon" style="color: #34c759; background: rgba(52, 199, 89, 0.1); border-color: rgba(52, 199, 89, 0.2);">🛡️</div>
         <h3 class="bento-title">纯粹零数据隐私泄漏</h3>
         <p class="bento-desc">
           无任何第三方统计或广告 SDK，无账号体系。流量直连目标服务，敏感 Cookie / Authorization 物理隔离在应用私有沙盒。
@@ -974,10 +1038,9 @@
 
   <!-- Scripts -->
   <script>
-    // Theme Switcher
+    // Theme Switcher: Default to light white theme
     const themeBtn = document.getElementById('theme-btn');
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    let currentTheme = localStorage.getItem('np_theme') || (prefersDark ? 'dark' : 'dark');
+    let currentTheme = localStorage.getItem('np_theme') || 'light';
     document.documentElement.setAttribute('data-theme', currentTheme);
 
     themeBtn.addEventListener('click', () => {
