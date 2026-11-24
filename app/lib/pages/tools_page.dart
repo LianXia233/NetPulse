@@ -148,6 +148,17 @@ class PingPanel extends StatefulWidget {
 class _PingPanelState extends State<PingPanel> {
   final _target = TextEditingController(text: '223.5.5.5');
   final _port = TextEditingController(text: '53');
+  final _count = TextEditingController(text: '20');
+  bool _countInit = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (!_countInit) {
+      _countInit = true;
+      _count.text = '${AppScope.of(context).pingCount}';
+    }
+  }
   CoreTask? _task;
   final List<double> _rtts = [];
   final List<Map<String, dynamic>> _rows = [];
@@ -160,6 +171,7 @@ class _PingPanelState extends State<PingPanel> {
     _task?.dispose();
     _target.dispose();
     _port.dispose();
+    _count.dispose();
     super.dispose();
   }
 
@@ -189,10 +201,13 @@ class _PingPanelState extends State<PingPanel> {
   void _start() {
     final target = _target.text.trim();
     if (target.isEmpty) return;
+    final count = (int.tryParse(_count.text) ?? 20).clamp(1, 500);
+    _count.text = '$count';
+    AppScope.of(context).setPingCount(count);
     final task = CoreTask.start('ping', {
       'target': target,
       'port': int.tryParse(_port.text) ?? 443,
-      'count': 12,
+      'count': count,
       'interval_ms': 700,
       'timeout_ms': 3000,
       'dns_servers': AppScope.of(context).dnsServers,
@@ -222,6 +237,10 @@ class _PingPanelState extends State<PingPanel> {
                 children: [
                   Expanded(
                     child: PmField(controller: _port, label: 'TCP 端口', keyboardType: TextInputType.number),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: PmField(controller: _count, label: '次数（默认 20）', keyboardType: TextInputType.number),
                   ),
                   const SizedBox(width: 12),
                   Padding(
@@ -833,6 +852,20 @@ class _TracePanelState extends State<TracePanel> {
 
 // ------------------------------------------------------------------ iperf3
 
+/// 内置公共 iperf3 服务器（来源：iperf.fr 官方列表，按地区分组）。
+const _iperfServers = [
+  ('巴黎 · OpenDSL', 'iperf.par2.as49434.net', '9200'),
+  ('阿姆斯特丹 · WorldStream', 'speedtest.worldstream.nl', '5201'),
+  ('法兰克福 · LG', 'speedtest.frankfurt.linode.com', '5201'),
+  ('悉尼 · LG', 'speedtest.sydney.linode.com', '5201'),
+  ('新加坡 · LG', 'speedtest.singapore.linode.com', '5201'),
+  ('纽约 · LG', 'speedtest.newark.linode.com', '5201'),
+  ('达拉斯 · LG', 'speedtest.dallas.linode.com', '5201'),
+  ('弗里蒙特 · LG', 'speedtest.fremont.linode.com', '5201'),
+  ('亚特兰大 · LG', 'speedtest.atlanta.linode.com', '5201'),
+  ('伦敦 · Linode', 'speedtest.london.linode.com', '5201'),
+];
+
 class IperfPanel extends StatefulWidget {
   const IperfPanel({super.key});
 
@@ -842,13 +875,39 @@ class IperfPanel extends StatefulWidget {
 
 class _IperfPanelState extends State<IperfPanel> {
   String _role = 'client';
-  final _host = TextEditingController(text: 'speed.cloudflare.com');
-  final _port = TextEditingController(text: '5201');
+  final _host = TextEditingController(text: 'iperf.par2.as49434.net');
+  final _port = TextEditingController(text: '9200');
   final _streams = TextEditingController(text: '4');
   final _duration = TextEditingController(text: '10');
+  final _interval = TextEditingController(text: '1');
+  bool _reverse = false;
+  bool _udp = false;
+  bool _downloadMode = true;
   CoreTask? _task;
   final List<String> _lines = [];
   int _seen = 0;
+  String? _binProblem;
+
+  @override
+  void initState() {
+    super.initState();
+    _checkBinary();
+  }
+
+  Future<void> _checkBinary() async {
+    // iperf3 以 libiperf3.so 形式打进 nativeLibDir，Android 9+ 可直接执行。
+    await NativeInfo.load();
+    if (!mounted) return;
+    String? problem;
+    if (!NativeInfo.iperfAvailable) {
+      problem = NativeInfo.iperfPath.isEmpty
+          ? '未找到内置 iperf3（libiperf3.so 未打包）'
+          : '内置 iperf3 不可执行：${NativeInfo.iperfPath}';
+    } else if (NativeInfo.sdkInt != 0 && NativeInfo.sdkInt < 28) {
+      problem = '内置 iperf3 需要 Android 9（API 28）及以上，当前 API ${NativeInfo.sdkInt}';
+    }
+    setState(() => _binProblem = problem);
+  }
 
   @override
   void dispose() {
@@ -858,6 +917,7 @@ class _IperfPanelState extends State<IperfPanel> {
     _port.dispose();
     _streams.dispose();
     _duration.dispose();
+    _interval.dispose();
     super.dispose();
   }
 
@@ -887,18 +947,20 @@ class _IperfPanelState extends State<IperfPanel> {
       pmToast(context, '内置 iperf3 需要 Android 9（API 28）及以上');
       return;
     }
-    final args = _role == 'server'
-        ? ['-s', '-p', _port.text.trim().isEmpty ? '5201' : _port.text.trim()]
-        : [
-            '-c',
-            _host.text.trim(),
-            '-p',
-            _port.text.trim().isEmpty ? '5201' : _port.text.trim(),
-            '-P',
-            _streams.text.trim().isEmpty ? '4' : _streams.text.trim(),
-            '-t',
-            _duration.text.trim().isEmpty ? '10' : _duration.text.trim(),
-          ];
+    final port = _port.text.trim().isEmpty ? '5201' : _port.text.trim();
+    final args = <String>[];
+    if (_role == 'server') {
+      args.addAll(['-s', '-p', port]);
+    } else {
+      args.addAll(['-c', _host.text.trim(), '-p', port]);
+      final streams = (int.tryParse(_streams.text) ?? 4).clamp(1, 128);
+      final secs = (int.tryParse(_duration.text) ?? 10).clamp(1, 3600);
+      final interval = (int.tryParse(_interval.text) ?? 1).clamp(1, 60);
+      args.addAll(['-P', '$streams', '-t', '$secs', '-i', '$interval']);
+      if (_reverse) args.add('-R');
+      if (_udp) args.add('-u');
+      if (_udp) args.addAll(['-b', '100M']);
+    }
     _lines.clear();
     _seen = 0;
     _task?.removeListener(_onTask);
@@ -918,6 +980,24 @@ class _IperfPanelState extends State<IperfPanel> {
     final running = _task?.running ?? false;
     return Column(
       children: [
+        if (_binProblem != null) ...[
+          PmCard(
+            padding: const EdgeInsets.all(14),
+            child: Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, size: 18, color: pm.warn),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _binProblem!,
+                    style: context.text.bodySmall?.copyWith(color: pm.warn, height: 1.4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 12),
+        ],
         PmCard(
           padding: const EdgeInsets.all(16),
           child: Column(
@@ -933,23 +1013,86 @@ class _IperfPanelState extends State<IperfPanel> {
               const SizedBox(height: 14),
               if (_role == 'client') ...[
                 PmField(controller: _host, label: '服务器', hint: 'host 或 IP'),
+                const SizedBox(height: 8),
+                SizedBox(
+                  height: 34,
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        for (final (name, host, port) in _iperfServers)
+                          Padding(
+                            padding: const EdgeInsets.only(right: 6),
+                            child: ActionChip(
+                              label: Text(name, style: const TextStyle(fontSize: 10.5)),
+                              onPressed: () {
+                                setState(() {
+                                  _host.text = host;
+                                  _port.text = port;
+                                });
+                              },
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 10),
                 Row(
                   children: [
-                    Expanded(child: PmField(controller: _streams, label: '并发流', keyboardType: TextInputType.number)),
+                    Expanded(child: PmField(controller: _streams, label: '并发流 (-P)', keyboardType: TextInputType.number)),
                     const SizedBox(width: 10),
-                    Expanded(child: PmField(controller: _duration, label: '时长(秒)', keyboardType: TextInputType.number)),
+                    Expanded(child: PmField(controller: _duration, label: '时长秒 (-t)', keyboardType: TextInputType.number)),
+                    const SizedBox(width: 10),
+                    Expanded(child: PmField(controller: _interval, label: '报告间隔 (-i)', keyboardType: TextInputType.number)),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                Row(
+                  children: [
+                    Expanded(
+                      child: PmSegmented<String>(
+                        items: const [
+                          (value: 'down', label: '下行 (-R)'),
+                          (value: 'up', label: '上行'),
+                        ],
+                        value: _downloadMode ? 'down' : 'up',
+                        onChanged: (v) => setState(() {
+                          _downloadMode = v == 'down';
+                          _reverse = _downloadMode;
+                        }),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: PmSegmented<String>(
+                        items: const [
+                          (value: 'tcp', label: 'TCP'),
+                          (value: 'udp', label: 'UDP'),
+                        ],
+                        value: _udp ? 'udp' : 'tcp',
+                        onChanged: (v) => setState(() => _udp = v == 'udp'),
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 10),
               ],
-              PmField(controller: _port, label: '端口', keyboardType: TextInputType.number),
-              const SizedBox(height: 12),
-              PmPrimaryButton(
-                label: running ? '运行中…' : (_role == 'server' ? '启动 iperf3 服务端' : '开始打流'),
-                loading: running,
-                icon: Icons.speed_rounded,
-                onPressed: running ? () => _task?.stop() : _start,
+              Row(
+                children: [
+                  Expanded(child: PmField(controller: _port, label: '端口 (-p)', keyboardType: TextInputType.number)),
+                  const SizedBox(width: 12),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 18),
+                    child: PmPrimaryButton(
+                      label: running ? '停止' : (_role == 'server' ? '启动服务端' : '开始打流'),
+                      expand: false,
+                      icon: running ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                      destructive: running,
+                      onPressed: running ? () => _task?.stop() : _start,
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
@@ -968,9 +1111,13 @@ class _IperfPanelState extends State<IperfPanel> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   if (_lines.isEmpty)
-                    const Text(
-                      'iperf3 输出将显示在这里，例如：\nConnecting to host ...\n[  5]   0.00-1.00   sec   ...  sender',
-                      style: TextStyle(color: Color(0xFF6E6E7A), fontSize: 11, height: 1.5, fontFamily: 'monospace'),
+                    Text(
+                      _binProblem != null
+                          ? '解决上方问题后即可打流。'
+                          : 'iperf3 输出将显示在这里。\n'
+                              '客户端示例：iperf3 -c <服务器> -p 5201 -P 4 -t 10 -i 1 -R\n'
+                              '也可自建：电脑端运行 iperf3 -s，手机连同一网络后填电脑 IP。',
+                      style: const TextStyle(color: Color(0xFF6E6E7A), fontSize: 11, height: 1.5, fontFamily: 'monospace'),
                     ),
                   for (final line in _lines.reversed.take(60).toList().reversed)
                     Padding(
@@ -987,7 +1134,8 @@ class _IperfPanelState extends State<IperfPanel> {
         ),
         const SizedBox(height: 8),
         Text(
-          '内置 iperf3 由 BSD-3-Clause 授权（Lawrence Berkeley National Laboratory），以 libiperf3.so 形式随包提供。',
+          '内置 iperf3 由 BSD-3-Clause 授权（Lawrence Berkeley National Laboratory），以 libiperf3.so 形式随包提供；'
+          '公共服务器来自 iperf.fr 公开列表，可用性以实际为准。',
           style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
         ),
       ],

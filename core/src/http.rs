@@ -808,7 +808,9 @@ fn send_once(
         }
     }
     if let Some(b) = body {
-        if !has_header("content-length") && !has_header("transfer-encoding") {
+        // CL 以实际 body 长度为准统一写出（req.headers 里的 CL 在上方被跳过，
+        // 不能依赖 has_header 判断，否则上传测速会缺 CL 导致挂起）。
+        if !has_header("transfer-encoding") {
             head.push_str(&format!("Content-Length: {}\r\n", b.len()));
         }
     }

@@ -37,7 +37,13 @@ class _BrowserPageState extends State<BrowserPage> {
       '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
   static final _downloadPattern = RegExp(
-    r'\.(zip|apk|apks|xapk|exe|msi|dmg|iso|img|rar|7z|tar|gz|tgz|bz2|xz|pdf|epub|mobi|mp4|mkv|avi|mov|flv|webm|mp3|flac|wav|aac|m4a|doc|docx|xls|xlsx|ppt|pptx|bin|dat|jar|aar|whl|crx|ttf|otf)(\?|#|$)',
+    r'\.(zip|apk|apks|xapk|apkm|exe|msi|dmg|iso|img|rar|7z|tar|gz|tgz|bz2|xz|zst|pdf|epub|mobi|azw3|mp4|mkv|avi|mov|flv|webm|m4v|ts|mp3|flac|wav|aac|m4a|ogg|opus|doc|docx|xls|xlsx|ppt|pptx|bin|dat|jar|aar|whl|crx|ttf|otf|woff2?|deb|rpm|ipsw|psp|3ds|rom|sav|db|sqlite|sql|csv|psd|ai|cdr|dmg\.part|7z\.001|r\d{2}|part1)(\?|#|$)',
+    caseSensitive: false,
+  );
+
+  /// 流媒体清单（嗅探后单独标记，不走普通下载）。
+  static final _streamPattern = RegExp(
+    r'\.(m3u8|mpd|mp3\?|m3u)(\?|#|$)|/hls/|/dash/',
     caseSensitive: false,
   );
 
@@ -61,8 +67,8 @@ class _BrowserPageState extends State<BrowserPage> {
               _started = true;
             });
             await _syncNav();
-            if ((_store?.browserSniff ?? true) &&
-                (_store?.browserJavaScript ?? true)) {
+            if (_store?.browserSniff ?? true) {
+              await _installResourceHook();
               await _sniff();
             }
             if (_store?.browserUaMode == 'desktop') {
@@ -147,10 +153,19 @@ class _BrowserPageState extends State<BrowserPage> {
             : JavaScriptMode.disabled,
       );
       await _controller.setUserAgent(_resolveUserAgent(store));
+      await _installResourceHook();
       if (reload && _started) {
         _controller.reload();
         if (mounted) setState(() => _loading = true);
       }
+    } catch (_) {}
+  }
+
+  /// 注入 fetch / XHR 钩子：页面运行期发出的资源请求（含动态生成的下载直链）
+  /// 都会带 Content-Type / Content-Length 记录到 window.__npRes，供嗅探合并。
+  Future<void> _installResourceHook() async {
+    try {
+      await _controller.runJavaScript(ResourceSnifferHook.script);
     } catch (_) {}
   }
 
@@ -405,32 +420,55 @@ class _BrowserPageState extends State<BrowserPage> {
     };
   }
 
+  /// DOM 静态扫描 + 网络钩子记录合并；同一 URL 去重，带类型/大小标注。
   Future<void> _sniff() async {
-    const script = r'''
-(() => {
-  const re = /\.(zip|apk|apks|xapk|exe|msi|dmg|iso|img|rar|7z|tar|gz|tgz|bz2|xz|pdf|epub|mobi|mp4|mkv|avi|mov|flv|webm|mp3|flac|wav|aac|m4a|doc|docx|xls|xlsx|ppt|pptx|bin|dat|jar|aar|whl|crx|ttf|otf)(\?|#|$)/i;
-  const out = [];
-  document.querySelectorAll('a[href]').forEach(a => {
-    const href = a.href || '';
-    if (!href.startsWith('http')) return;
-    if (a.hasAttribute('download') || re.test(href)) {
-      out.push({url: href, name: (a.getAttribute('download') || a.textContent || '').trim().slice(0, 120)});
-    }
-  });
-  return JSON.stringify(out.slice(0, 60));
-})()
-''';
-    final text = await _jsString(script);
+    if ((_store?.browserJavaScript ?? true) != true) return;
+    final text = await _jsString(ResourceSnifferHook.collect);
     if (text.isEmpty || text == 'null') return;
     try {
-      final list = (jsonDecode(text) as List).whereType<Map>().map((e) {
+      final decoded = jsonDecode(text);
+      if (decoded is! List) return;
+      final list = decoded.whereType<Map>().map((e) {
         return {
           'url': e['url']?.toString() ?? '',
-          'name': e['name']?.toString() ?? '',
+          'name': (e['name']?.toString() ?? '').trim(),
+          'type': e['type']?.toString() ?? '',
+          'size': e['size'] is num ? (e['size'] as num).toInt() : null,
+          'source': e['source']?.toString() ?? '',
         };
       }).where((e) => (e['url'] ?? '').toString().startsWith('http')).toList();
-      if (mounted) setState(() => _links = list);
+      // 去重（按 URL），优先保留带 size/type 信息更全的记录
+      final byUrl = <String, Map<String, dynamic>>{};
+      for (final e in list) {
+        final u = e['url'] as String;
+        final old = byUrl[u];
+        if (old == null) {
+          byUrl[u] = e;
+        } else {
+          if (((old['size'] ?? 0) == 0) && ((e['size'] ?? 0) != 0)) byUrl[u] = e;
+          if ((old['type'] ?? '').toString().isEmpty &&
+              (e['type'] ?? '').toString().isNotEmpty) {
+            byUrl[u] = {...byUrl[u]!, 'type': e['type']};
+          }
+        }
+      }
+      final merged = byUrl.values.toList()
+        ..sort((a, b) {
+          final as = (a['size'] as int?) ?? 0;
+          final bs = (b['size'] as int?) ?? 0;
+          return bs.compareTo(as);
+        });
+      if (mounted) setState(() => _links = merged.take(80).toList());
     } catch (_) {}
+  }
+
+  /// 手动重新嗅探当前页面。
+  Future<void> _resniff() async {
+    await _installResourceHook();
+    await _sniff();
+    if (mounted) {
+      pmToast(context, _links.isEmpty ? '未嗅探到资源' : '已嗅探到 ${_links.length} 个资源');
+    }
   }
 
   Future<void> _downloadLink(String url, {String? name}) async {
@@ -441,14 +479,34 @@ class _BrowserPageState extends State<BrowserPage> {
 
   void _showLinks() {
     if (_links.isEmpty) {
-      pmToast(context, '当前页面没有嗅探到可下载链接');
+      pmToast(context, '当前页面没有嗅探到可下载资源；可点“重嗅探”再试');
       return;
     }
     showPmSheet(
       context,
-      title: '页面链接（${_links.length}）',
+      title: '嗅探资源（${_links.length}）',
       body: Column(
         children: [
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(
+              children: [
+                Text(
+                  '视频 · 音频 · 安装包 · 文档 · 网络钩子捕获的直链',
+                  style: context.text.bodySmall?.copyWith(color: context.pm.muted, fontSize: 11),
+                ),
+                const Spacer(),
+                TextButton.icon(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _resniff();
+                  },
+                  icon: const Icon(Icons.refresh_rounded, size: 15),
+                  label: const Text('重嗅探', style: TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+          ),
           for (final l in _links)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
@@ -457,27 +515,64 @@ class _BrowserPageState extends State<BrowserPage> {
                 radius: 16,
                 onTap: () {
                   Navigator.pop(context);
-                  _downloadLink(l['url'].toString(), name: (l['name'] as String?)?.isEmpty ?? true ? null : l['name']);
+                  _downloadLink(
+                    l['url'].toString(),
+                    name: (l['name'] as String?)?.isEmpty ?? true ? null : l['name'],
+                  );
                 },
                 child: Row(
                   children: [
-                    PmIconBadge(Icons.insert_drive_file_rounded, size: 32, radius: 10),
+                    PmIconBadge(
+                      _typeIcon('${l['type']} ${l['url']}'),
+                      size: 32,
+                      radius: 10,
+                    ),
                     const SizedBox(width: 10),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           Text(
-                            (l['name'] as String?)?.isNotEmpty == true ? l['name'] : l['url'],
+                            (l['name'] as String?)?.isNotEmpty == true
+                                ? l['name']!
+                                : Uri.tryParse(l['url'].toString())?.pathSegments.last ??
+                                    l['url'].toString(),
                             style: context.text.bodySmall,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
-                          Text(
-                            l['url'].toString(),
-                            style: context.text.bodySmall?.copyWith(color: context.pm.muted, fontSize: 10),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                          Row(
+                            children: [
+                              Expanded(
+                                child: Text(
+                                  l['url'].toString(),
+                                  style: context.text.bodySmall?.copyWith(
+                                    color: context.pm.muted,
+                                    fontSize: 10,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                              if ((l['size'] as int?) != null && (l['size'] as int) > 0)
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 6),
+                                  child: PmPill(
+                                    label: _fmtSize(l['size'] as int),
+                                    dense: true,
+                                    color: context.pm.muted,
+                                  ),
+                                ),
+                              if ((l['type'] ?? '').toString().isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(left: 4),
+                                  child: PmPill(
+                                    label: l['type'].toString(),
+                                    dense: true,
+                                    color: context.scheme.primary,
+                                  ),
+                                ),
+                            ],
                           ),
                         ],
                       ),
@@ -490,6 +585,37 @@ class _BrowserPageState extends State<BrowserPage> {
         ],
       ),
     );
+  }
+
+  static IconData _typeIcon(String haystack) {
+    final h = haystack.toLowerCase();
+    if (_streamPattern.hasMatch(h)) return Icons.stream_rounded;
+    if (h.contains('video') ||
+        RegExp(r'\.(mp4|mkv|avi|mov|flv|webm|m4v|ts)(\?|#|$)').hasMatch(h)) {
+      return Icons.videocam_rounded;
+    }
+    if (h.contains('audio') ||
+        RegExp(r'\.(mp3|flac|wav|aac|m4a|ogg|opus)(\?|#|$)').hasMatch(h)) {
+      return Icons.music_note_rounded;
+    }
+    if (h.contains('image')) return Icons.image_rounded;
+    if (RegExp(r'\.(apk|apks|xapk|apkm|exe|msi|deb|rpm|dmg|ipsw)(\?|#|$)').hasMatch(h)) {
+      return Icons.install_mobile_rounded;
+    }
+    if (RegExp(r'\.(zip|rar|7z|tar|gz|tgz|bz2|xz|zst)(\?|#|$)').hasMatch(h)) {
+      return Icons.folder_zip_rounded;
+    }
+    if (RegExp(r'\.(pdf|epub|mobi|azw3|docx?|xlsx?|pptx?|csv)(\?|#|$)').hasMatch(h)) {
+      return Icons.description_rounded;
+    }
+    return Icons.insert_drive_file_rounded;
+  }
+
+  static String _fmtSize(int bytes) {
+    if (bytes >= 1 << 30) return '${(bytes / (1 << 30)).toStringAsFixed(1)} GB';
+    if (bytes >= 1 << 20) return '${(bytes / (1 << 20)).toStringAsFixed(1)} MB';
+    if (bytes >= 1 << 10) return '${(bytes / (1 << 10)).toStringAsFixed(0)} KB';
+    return '$bytes B';
   }
 
   @override
@@ -689,7 +815,7 @@ class _BrowserPageState extends State<BrowserPage> {
                     Expanded(
                       child: _NavButton(
                         icon: Icons.link_rounded,
-                        label: '链接${_links.isEmpty ? '' : ' ${_links.length}'}',
+                        label: '资源${_links.isEmpty ? '' : ' ${_links.length}'}',
                         accent: _links.isNotEmpty,
                         onTap: _showLinks,
                       ),
@@ -947,4 +1073,108 @@ class _BrowserSwitchRow extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 资源嗅探钩子：注入页面后持续记录网络请求与媒体元素。
+class ResourceSnifferHook {
+  /// 安装 fetch / XHR 钩子；幂等（重复注入直接返回）。
+  static const String script = r'''
+(() => {
+  if (window.__npHookInstalled) return 'ok';
+  window.__npHookInstalled = true;
+  window.__npRes = [];
+  const push = (rec) => {
+    try {
+      if (!rec || !rec.url || !/^https?:/.test(rec.url)) return;
+      if (window.__npRes.length < 400) window.__npRes.push(rec);
+    } catch (e) {}
+  };
+  // fetch 钩子
+  const origFetch = window.fetch;
+  if (origFetch) {
+    window.fetch = function (...args) {
+      const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url) || '';
+      const p = origFetch.apply(this, args);
+      p.then(res => {
+        try {
+          push({
+            url: res.url || url,
+            type: res.headers.get('content-type') || '',
+            size: Number(res.headers.get('content-length')) || 0,
+            source: 'fetch',
+          });
+        } catch (e) { push({url: url, type: '', size: 0, source: 'fetch'}); }
+      }).catch(() => push({url: url, type: '', size: 0, source: 'fetch'}));
+      return p;
+    };
+  }
+  // XHR 钩子
+  const OrigOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    this.__npUrl = url;
+    this.addEventListener('load', () => {
+      try {
+        const ct = this.getResponseHeader('content-type') || '';
+        const cl = this.getResponseHeader('content-length') || '0';
+        push({url: this.responseURL || this.__npUrl, type: ct, size: Number(cl) || 0, source: 'xhr'});
+      } catch (e) {}
+    });
+    return OrigOpen.apply(this, arguments);
+  };
+  return 'ok';
+})()
+''';
+
+  /// 收集：网络钩子记录 + DOM 媒体/直链扫描，合并去重后返回 JSON 数组文本。
+  static const String collect = r'''
+(() => {
+  const re = /\.(zip|apk|apks|xapk|apkm|exe|msi|dmg|iso|img|rar|7z|tar|gz|tgz|bz2|xz|zst|pdf|epub|mobi|azw3|mp4|mkv|avi|mov|flv|webm|m4v|ts|mp3|flac|wav|aac|m4a|ogg|opus|doc|docx|xls|xlsx|ppt|pptx|bin|dat|jar|aar|whl|crx|ttf|otf|woff2?|deb|rpm|ipsw|db|sqlite|sql|csv)(\?|#|$)/i;
+  const streamRe = /\.(m3u8|mpd|m3u)(\?|#|$)/i;
+  const out = [];
+  const seen = {};
+  const add = (url, name, type, size, source) => {
+    try {
+      if (!url || !/^https?:/.test(url)) return;
+      if (seen[url]) {
+        if (!seen[url].size && size) seen[url].size = size;
+        if (!seen[url].type && type) seen[url].type = type;
+        return;
+      }
+      seen[url] = {url: url, name: name || '', type: type || '', size: size || 0, source: source || ''};
+      out.push(seen[url]);
+    } catch (e) {}
+  };
+  // 1) 网络钩子记录：过滤出"像资源"的响应（大体积 / 媒体 / 下载扩展名）
+  (window.__npRes || []).forEach(r => {
+    const u = r.url || '';
+    const looksRes = r.size > 100000 || /video|audio|application\/(zip|x-7z|rar|octet-stream|pdf|epub)/i.test(r.type || '') || re.test(u) || streamRe.test(u);
+    if (looksRes) {
+      const isStream = streamRe.test(u);
+      add(u, '', isStream ? 'stream' : r.type, r.size, 'net');
+    }
+  });
+  // 2) a[download] 与下载扩展名直链
+  document.querySelectorAll('a[href]').forEach(a => {
+    const href = a.href || '';
+    if (!href.startsWith('http')) return;
+    const text = (a.getAttribute('download') || a.textContent || '').trim().slice(0, 120);
+    if (a.hasAttribute('download')) { add(href, text, 'download', 0, 'dom'); return; }
+    if (streamRe.test(href)) { add(href, text, 'stream', 0, 'dom'); }
+    else if (re.test(href)) { add(href, text, 'file', 0, 'dom'); }
+  });
+  // 3) 媒体元素（video / source / audio）
+  document.querySelectorAll('video,source,audio').forEach(m => {
+    const src = m.src || m.currentSrc || m.getAttribute('src') || '';
+    if (src) add(src, '', m.tagName === 'AUDIO' ? 'audio' : 'video', 0, 'media');
+    const poster = m.getAttribute('poster');
+    if (poster && /^https?:/.test(poster)) add(poster, '', 'poster', 0, 'media');
+  });
+  // 4) blob 视频源背后的真实地址提示（部分站点把直链放 data-* 里）
+  document.querySelectorAll('video[src^="blob:"]').forEach(v => {
+    const hint = v.getAttribute('data-src') || v.getAttribute('data-video') || '';
+    if (/^https?:/.test(hint)) add(hint, '', 'video', 0, 'media');
+  });
+  return JSON.stringify(out.slice(0, 80));
+})()
+''';
 }

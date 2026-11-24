@@ -6,7 +6,7 @@ description = "NetPulse Rust core: multi-CDN / multi-DNS throughput engine, down
 
 [lib]
 name = "netpulse_core"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

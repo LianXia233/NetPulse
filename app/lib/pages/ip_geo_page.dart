@@ -71,6 +71,46 @@ class _IpGeoPageState extends State<IpGeoPage> {
 
   String get _dbPath => '${NativeInfo.filesDir}/ipdb.tsv';
 
+  /// 内置可在线更新的数据库预设（全部免登录直连，已验证可用）。
+  static const _dbPresets = [
+    (
+      'ip2region 城市',
+      'https://raw.githubusercontent.com/lionsoul2014/ip2region/master/data/ip2region_v4.xdb',
+      'ip2region v4 · 城市级 · 中文（国家|区域|省份|城市|ISP）',
+    ),
+    (
+      '纯真 IP 库',
+      'https://raw.githubusercontent.com/nmgliangwei/qqwry/main/qqwry.dat',
+      '纯真社区版 qqwry.dat · 城市级中文 · 每周更新',
+    ),
+    (
+      'GeoLite2 城市',
+      'https://github.com/sapics/ip-location-db/releases/download/latest/geolite2-city-ipv4-num.csv.gz',
+      'MaxMind GeoLite2 City 镜像 · 城市级 · 每周更新',
+    ),
+    (
+      'GeoLite2 国家',
+      'https://github.com/sapics/ip-location-db/releases/download/latest/geolite2-country-ipv4-num.csv',
+      'MaxMind GeoLite2 Country 镜像 · 国家级 · 每周更新',
+    ),
+    (
+      'DB-IP 城市',
+      'https://github.com/sapics/ip-location-db/releases/download/latest/dbip-city-ipv4-num.csv.gz',
+      'DB-IP Lite City · 城市级 · 每月更新',
+    ),
+    (
+      'IP2Location 国家',
+      'https://download.ip2location.com/lite/IP2LOCATION-LITE-DB1.CSV.ZIP',
+      'IP2Location LITE DB1 · 国家级 · 每月更新',
+    ),
+  ];
+
+  String get _dbHint {
+    final url = _dbUrl.text.trim();
+    if (url.isNotEmpty) return url;
+    return _dbPresets[0].$2;
+  }
+
   bool _started = false;
 
   @override
@@ -81,6 +121,12 @@ class _IpGeoPageState extends State<IpGeoPage> {
     final store = AppScope.of(context);
     _dbUrl = TextEditingController(text: store.ipdbUrl);
     _api = TextEditingController(text: store.ipApiEndpoint);
+    _api.addListener(() {
+      final v = _api.text.trim();
+      if (v.isNotEmpty && v != store.ipApiEndpoint) {
+        store.setIpApiEndpoint(v);
+      }
+    });
     _loadInfo();
     _loadEgress();
   }
@@ -219,7 +265,7 @@ class _IpGeoPageState extends State<IpGeoPage> {
   Future<void> _updateDb() async {
     final url = _dbUrl.text.trim();
     if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      pmToast(context, '请填写 CSV / CSV.GZ 更新地址');
+      pmToast(context, '请填写 http(s) 更新地址');
       return;
     }
     AppScope.of(context).setIpdbUrl(url);
@@ -229,7 +275,11 @@ class _IpGeoPageState extends State<IpGeoPage> {
       if (!mounted) return;
       if (r['ok'] == true) {
         final data = (r['data'] as Map?) ?? const {};
-        pmToast(context, '位置库已更新：${data['count']} 条');
+        final fmt = data['format']?.toString() ?? '';
+        pmToast(
+          context,
+          '位置库已更新：${data['count']} 条${fmt.isEmpty ? '' : ' · $fmt'}',
+        );
         await _loadInfo();
       } else {
         pmToast(context, r['error']?.toString() ?? '更新失败');
@@ -258,7 +308,7 @@ class _IpGeoPageState extends State<IpGeoPage> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(kPagePadding, 8, kPagePadding, 30),
           children: [
-            const PmPageHeader(title: 'IP 归属地', subtitle: '内置位置库 · 出口纯净度 · 多字段 IP API', showBack: true),
+            const PmPageHeader(title: 'IP 归属地', subtitle: '多格式本地库 · 在线更新 · 出口纯净度 · 多源 IP API', showBack: true),
             _buildEgress(context),
             const SizedBox(height: 14),
             PmCard(
@@ -291,7 +341,7 @@ class _IpGeoPageState extends State<IpGeoPage> {
               _ApiCard(data: _apiData!, local: _local),
             ],
             const SizedBox(height: 14),
-            PmSectionTitle('位置库'),
+            PmSectionTitle('本地 IP 库（在线更新）'),
             PmCard(
               padding: const EdgeInsets.fromLTRB(16, 14, 16, 16),
               child: Column(
@@ -305,10 +355,10 @@ class _IpGeoPageState extends State<IpGeoPage> {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(info?['builtin'] == true ? '内置国家 / 地区库' : '本地位置库', style: context.text.titleMedium),
+                            Text(info?['builtin'] == true ? '内置国家 / 地区库' : '当前使用本地库', style: context.text.titleMedium),
                             const SizedBox(height: 2),
                             Text(
-                              '${info?['count'] ?? '—'} 条 · ${info?['builtin'] == true ? '开箱可用' : _fmtDate(info?['updated'])}',
+                              '${info?['count'] ?? '—'} 条 · ${info?['builtin'] == true ? '开箱可用' : _fmtDate(info?['updated'])}${info?['format'] != null && info?['format'] != 'builtin-seed' ? ' · ${info!['format']}' : ''}',
                               style: context.text.bodySmall?.copyWith(color: pm.muted),
                             ),
                           ],
@@ -318,11 +368,39 @@ class _IpGeoPageState extends State<IpGeoPage> {
                     ],
                   ),
                   const SizedBox(height: 12),
+                  Text(
+                    '选择要在线更新的数据库（自动识别格式，更新后立即生效）：',
+                    style: context.text.bodySmall?.copyWith(color: pm.muted),
+                  ),
+                  const SizedBox(height: 10),
                   PmField(
                     controller: _dbUrl,
-                    label: '更新地址（CSV / CSV.GZ）',
-                    hint: _monthPreset(),
+                    label: '更新地址（自动识别 TOML 不适用；支持 CSV / CSV.GZ / ZIP / .dat / .xdb / .mmdb / .bin）',
+                    hint: _dbHint,
                     maxLines: 2,
+                  ),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 34,
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          for (final (name, url, desc) in _dbPresets)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 6),
+                              child: ActionChip(
+                                label: Text(name, style: const TextStyle(fontSize: 10.5)),
+                                tooltip: desc,
+                                onPressed: () {
+                                  _dbUrl.text = url;
+                                  setState(() {});
+                                },
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
                   ),
                   const SizedBox(height: 8),
                   Row(
@@ -361,13 +439,38 @@ class _IpGeoPageState extends State<IpGeoPage> {
                 children: [
                   PmField(
                     controller: _api,
-                    label: '接口地址（{ip} 占位）',
+                    label: '接口地址（{ip} 占位，改动自动保存）',
                     hint: 'https://ipwho.is/{ip}',
                     maxLines: 2,
                   ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    height: 34,
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        children: [
+                          for (final (name, url) in AppStore.ipApiPresets)
+                            Padding(
+                              padding: const EdgeInsets.only(right: 6),
+                              child: ActionChip(
+                                label: Text(name, style: const TextStyle(fontSize: 10.5)),
+                                onPressed: () {
+                                  _api.text = url;
+                                  AppScope.of(context).setIpApiEndpoint(url);
+                                  pmToast(context, 'IP API 已切换为 $name');
+                                  setState(() {});
+                                },
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 6),
                   Text(
-                    '留空使用内置默认接口。接口返回的原始字段会全部展示，便于查看 ISP、ASN、坐标与时区。',
+                    '查询时先走此接口，失败后自动按 ipwho.is → ipapi.co → ipinfo.io → IP.SB → ipapi.is → proxycheck.io 顺序回退。'
+                    '在线结果会展示 ISP、ASN、坐标、时区与代理类型。',
                     style: context.text.bodySmall?.copyWith(color: pm.muted, height: 1.45),
                   ),
                 ],

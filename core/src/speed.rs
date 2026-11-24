@@ -509,6 +509,9 @@ fn upload_once(
         .push(("Content-Type".into(), "application/octet-stream".into()));
     req.headers
         .push(("Cache-Control".into(), "no-cache".into()));
+    req.headers
+        .push(("Content-Length".into(), body.len().to_string()));
+    req.headers.push(("Connection".into(), "close".into()));
     req.body = Some(body.clone());
     let counter = bytes.clone();
     req.write_progress = Some(std::sync::Arc::new(move |n| {

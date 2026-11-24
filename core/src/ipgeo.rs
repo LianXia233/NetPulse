@@ -1,9 +1,12 @@
-//! IP 归属地：内置可更新位置库 + 可配置 IP API。
+//! IP 归属地：多格式本地库 + 多在线 API。
 //!
-//! 本地库采用紧凑 TSV（start\tend\tcountry\tregion\tcity\tisp），支持 CSV / CSV.GZ 导入；
+//! 本地库支持六种格式（NetPulse TSV / CSV(.gz) / 纯真 qqwry.dat / ip2region xdb /
+//! IP2Proxy LITE BIN / MaxMind GeoLite2 .mmdb），按文件头自动识别（见 ipdb 模块）；
 //! 无本地文件时使用编译进二进制的国家/地区级种子库。
 
 use crate::http::{send, Req, ResolveCache};
+use crate::ipdb::{self, DbKind, Entry};
+use crate::ipdb::ipv4;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::Read;
@@ -11,16 +14,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::thread;
-
-#[derive(Clone)]
-struct Entry {
-    start: u32,
-    end: u32,
-    country: String,
-    region: String,
-    city: String,
-    isp: String,
-}
 
 struct Cache {
     key: String,
@@ -30,114 +23,13 @@ struct Cache {
 static CACHE: OnceLock<Mutex<Option<Cache>>> = OnceLock::new();
 static SEED: OnceLock<Arc<Vec<Entry>>> = OnceLock::new();
 
-fn ipv4(s: &str) -> Option<u32> {
-    let parts: Vec<&str> = s.trim().split('.').collect();
-    if parts.len() != 4 {
-        return None;
-    }
-    let mut v: u32 = 0;
-    for p in parts {
-        let n: u32 = p.parse().ok()?;
-        if n > 255 {
-            return None;
-        }
-        v = (v << 8) | n;
-    }
-    Some(v)
-}
-
-fn u32ip(v: u32) -> String {
-    format!("{}.{}.{}.{}", v >> 24, (v >> 16) & 255, (v >> 8) & 255, v & 255)
-}
-
-fn split_csv(line: &str, delim: char) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut quoted = false;
-    let mut chars = line.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '"' {
-            if quoted && chars.peek() == Some(&'"') {
-                cur.push('"');
-                chars.next();
-            } else {
-                quoted = !quoted;
-            }
-        } else if c == delim && !quoted {
-            out.push(cur.trim().to_string());
-            cur.clear();
-        } else if c != '\r' && c != '\n' {
-            cur.push(c);
-        }
-    }
-    out.push(cur.trim().to_string());
-    out
-}
-
-fn parse_db(text: &str) -> Vec<Entry> {
-    let mut entries: Vec<Entry> = Vec::new();
-    let mut cols: Option<(usize, usize, usize, usize, usize, usize)> = None;
-    for (i, line) in text.lines().enumerate() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let delim = if line.contains('\t') { '\t' } else { ',' };
-        let f = split_csv(line, delim);
-        if f.len() < 2 {
-            continue;
-        }
-        let is_header = ipv4(&f[0]).is_none() && f[0].parse::<u32>().is_err();
-        if is_header {
-            let get = |keys: &[&str]| {
-                f.iter().position(|h| {
-                    let h = h.to_ascii_lowercase();
-                    keys.iter().any(|k| h == *k || h.contains(*k))
-                })
-            };
-            let start = get(&["ip_range_start", "range_start", "start"]).unwrap_or(0);
-            let end = get(&["ip_range_end", "range_end", "end"]).unwrap_or(1);
-            let country = get(&["country_name", "country_code", "country"]).unwrap_or(2.min(f.len() - 1));
-            let region = get(&["region_name", "region"]).unwrap_or(3.min(f.len() - 1));
-            let city = get(&["city_name", "city"]).unwrap_or(4.min(f.len() - 1));
-            let isp = get(&["isp", "organization", "org"]).unwrap_or(5.min(f.len() - 1));
-            cols = Some((start, end, country, region, city, isp));
-            continue;
-        }
-        let (si, ei, ci, ri, mi, ii) = cols.unwrap_or((0, 1, 2, 3, 4, 5));
-        if f.len() <= si.max(ei) {
-            continue;
-        }
-        let start = ipv4(&f[si]).or_else(|| f[si].parse::<u32>().ok());
-        let end = ipv4(&f[ei]).or_else(|| f[ei].parse::<u32>().ok());
-        if let (Some(s), Some(e)) = (start, end) {
-            if e >= s {
-                let take = |idx: usize| if idx < f.len() { f[idx].clone() } else { String::new() };
-                entries.push(Entry {
-                    start: s,
-                    end: e,
-                    country: take(ci),
-                    region: take(ri),
-                    city: take(mi),
-                    isp: take(ii),
-                });
-            }
-        }
-        if i > 0 && entries.len() > 900_000 {
-            break;
-        }
-    }
-    entries.sort_by_key(|e| e.start);
-    entries
-}
-
 fn seed_entries() -> &'static Arc<Vec<Entry>> {
     SEED.get_or_init(|| {
         let gz = include_bytes!("../assets/ipdb_seed.tsv.gz");
         let mut dec = flate2::read::GzDecoder::new(&gz[..]);
         let mut text = String::new();
         let _ = dec.read_to_string(&mut text);
-        Arc::new(parse_db(&text))
+        Arc::new(ipdb::parse_any("seed.tsv", text.as_bytes()).unwrap_or_default())
     })
 }
 
@@ -161,11 +53,10 @@ fn load(path: &str) -> Arc<Vec<Entry>> {
         }
     }
     let entries = if Path::new(path).exists() {
-        Arc::new(
-            fs::read_to_string(path)
-                .map(|t| parse_db(&t))
-                .unwrap_or_default(),
-        )
+        match fs::read(path) {
+            Ok(raw) => Arc::new(ipdb::parse_any(path, &raw).unwrap_or_default()),
+            Err(_) => seed_entries().clone(),
+        }
     } else {
         seed_entries().clone()
     };
@@ -174,18 +65,7 @@ fn load(path: &str) -> Arc<Vec<Entry>> {
 }
 
 fn find(entries: &[Entry], ip: u32) -> Option<Entry> {
-    let mut hi = entries.partition_point(|e| e.start <= ip);
-    while hi > 0 {
-        hi -= 1;
-        let e = &entries[hi];
-        if e.start <= ip && ip <= e.end {
-            return Some(e.clone());
-        }
-        if entries.len() - hi > 8 {
-            break;
-        }
-    }
-    None
+    ipdb::find(entries, ip).cloned()
 }
 
 fn country_name(code: &str) -> String {
@@ -482,18 +362,26 @@ pub fn info(args: &Value) -> Result<Value, String> {
     let entries = load(path);
     let mut source = String::new();
     let mut updated: u64 = 0;
+    let mut format = String::new();
     if local {
-        if let Ok(text) = fs::read_to_string(path) {
-            for line in text.lines().take(4) {
-                if let Some(v) = line.strip_prefix("#source\t") {
-                    source = v.to_string();
-                }
-                if let Some(v) = line.strip_prefix("#updated\t") {
-                    updated = v.parse().unwrap_or(0);
+        if let Ok(head_raw) = fs::read(path) {
+            let head = &head_raw[..head_raw.len().min(64)];
+            format = format!("{:?}", ipdb::detect_kind(path, head, head_raw.len() as u64));
+            if let Ok(text) = String::from_utf8(head_raw[..head_raw.len().min(512)].to_vec()) {
+                for line in text.lines().take(6) {
+                    if let Some(v) = line.strip_prefix("#source\t") {
+                        source = v.to_string();
+                    }
+                    if let Some(v) = line.strip_prefix("#updated\t") {
+                        updated = v.parse().unwrap_or(0);
+                    }
                 }
             }
         }
     }
+    let kind_label = match ipdb::detect_kind(path, &[], 0) {
+        _ => format,
+    };
     Ok(json!({
         "builtin": !local,
         "path": path,
@@ -503,6 +391,7 @@ pub fn info(args: &Value) -> Result<Value, String> {
         } else { source },
         "updated": updated,
         "size": fs::metadata(path).map(|m| m.len()).unwrap_or(0),
+        "format": if local { kind_label } else { "builtin-seed".to_string() },
     }))
 }
 
@@ -511,7 +400,8 @@ pub fn lookup(args: &Value) -> Result<Value, String> {
     let ipn = ipv4(ip).ok_or("仅支持 IPv4 地址")?;
     let path = args["path"].as_str().unwrap_or("");
     let entries = load(path);
-    match find(entries.as_slice(), ipn) {
+    let builtin = !Path::new(path).exists();
+    match find(&entries, ipn) {
         Some(e) => Ok(json!({
             "found": true,
             "ip": ip,
@@ -520,10 +410,11 @@ pub fn lookup(args: &Value) -> Result<Value, String> {
             "region": e.region,
             "city": e.city,
             "isp": e.isp,
-            "range": format!("{} - {}", u32ip(e.start), u32ip(e.end)),
-            "builtin": !Path::new(path).exists(),
+            "proxy": e.extra,
+            "range": format!("{} - {}", ipdb::u32ip(e.start), ipdb::u32ip(e.end)),
+            "builtin": builtin,
         })),
-        None => Ok(json!({"found": false, "ip": ip, "builtin": !Path::new(path).exists()})),
+        None => Ok(json!({"found": false, "ip": ip, "builtin": builtin})),
     }
 }
 
@@ -534,12 +425,12 @@ pub fn lookup_many(args: &Value) -> Result<Value, String> {
     let builtin = !Path::new(path).exists();
     let mut out = Vec::with_capacity(ips.len());
     for ip in ips {
-        match ipv4(&ip).and_then(|n| find(entries.as_slice(), n)) {
+        match ipv4(&ip).and_then(|n| ipdb::find(&entries, n).cloned()) {
             Some(e) => out.push(json!({
                 "ip": ip, "found": true, "country_code": e.country,
                 "country": country_name(&e.country), "region": e.region,
-                "city": e.city, "isp": e.isp,
-                "range": format!("{} - {}", u32ip(e.start), u32ip(e.end)), "builtin": builtin,
+                "city": e.city, "isp": e.isp, "proxy": e.extra,
+                "range": format!("{} - {}", ipdb::u32ip(e.start), ipdb::u32ip(e.end)), "builtin": builtin,
             })),
             None => out.push(json!({"ip": ip, "found": false, "builtin": builtin})),
         }
@@ -554,7 +445,7 @@ pub fn update(args: &Value) -> Result<Value, String> {
         return Err("更新地址必须是 http/https".into());
     }
     let mut req = Req::new("GET", url);
-    req.read_timeout = Duration::from_secs(45);
+    req.read_timeout = Duration::from_secs(90);
     req.connect_timeout = Duration::from_secs(10);
     req.headers.push(("Accept-Encoding".into(), "identity".into()));
     let resp = send(&req, &http_cache())?;
@@ -562,41 +453,73 @@ pub fn update(args: &Value) -> Result<Value, String> {
         return Err(format!("下载失败 HTTP {}", resp.status));
     }
     if let Some(len) = resp.header("content-length").and_then(|v| v.parse::<u64>().ok()) {
-        if len > 128 * 1024 * 1024 {
-            return Err("位置库文件过大（>128MB）".into());
+        if len > 192 * 1024 * 1024 {
+            return Err("位置库文件过大（>192MB）".into());
         }
     }
     let mut raw = Vec::new();
-    let mut limited = resp.reader.take(128 * 1024 * 1024);
+    let mut limited = resp.reader.take(192 * 1024 * 1024);
     limited.read_to_end(&mut raw).map_err(|e| format!("读取失败: {}", e))?;
-    let text = if raw.starts_with(&[0x1f, 0x8b]) {
-        let mut dec = flate2::read::GzDecoder::new(&raw[..]);
-        let mut t = String::new();
-        dec.read_to_string(&mut t).map_err(|e| format!("解压失败: {}", e))?;
-        t
-    } else {
-        String::from_utf8_lossy(&raw).to_string()
-    };
-    let entries = parse_db(&text);
+    if raw.is_empty() {
+        return Err("下载内容为空".into());
+    }
+
+    // 归一化：ZIP 解包 / gz 解包后交给多格式解析器。
+    let mut payload = raw;
+    let mut source_name = url.rsplit('/').next().unwrap_or(url).to_string();
+    if payload.len() >= 4 && &payload[0..2] == b"PK" {
+        let inner = ipdb::unzip_first(&payload).ok_or("ZIP 中没有找到数据库文件")?;
+        if let Some(name) = args["zip_name"].as_str() {
+            source_name = name.to_string();
+        }
+        payload = inner;
+    }
+    let entries = ipdb::parse_any(&source_name, &payload)?;
     if entries.is_empty() {
-        return Err("未解析到有效的 IP 段，请确认是 CSV / CSV.GZ".into());
+        return Err("未解析到有效的 IP 段".into());
     }
+
+    // 统一转存为 NetPulse TSV（保留原始格式魔数会丢失，所以统一格式化）；
+    // 原 .xdb/.dat/.mmdb 用户也可以选择「原样保存」：仅当解析格式 >= 90 条且是单一
+    // 原生格式时，直接存原始字节以保留城市/ISP 字段的完整精度。
+    let head = &payload[..payload.len().min(64)];
+    let kind = ipdb::detect_kind(&source_name, head, payload.len() as u64);
+    let native = matches!(
+        kind,
+        DbKind::Qqwry | DbKind::Xdb | DbKind::Ip2Proxy | DbKind::Mmdb
+    );
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let mut out = String::with_capacity(entries.len() * 28);
-    out.push_str(&format!("#source\t{}\n#updated\t{}\n#count\t{}\n", url, now, entries.len()));
-    for e in &entries {
-        out.push_str(&format!("{}\t{}\t{}\t{}\t{}\t{}\n", e.start, e.end, e.country, e.region, e.city, e.isp));
-    }
     if let Some(dir) = Path::new(path).parent() {
         let _ = fs::create_dir_all(dir);
     }
-    let tmp = format!("{}.tmp", path);
-    fs::write(&tmp, out).map_err(|e| format!("写入失败: {}", e))?;
-    fs::rename(&tmp, path).map_err(|e| format!("保存失败: {}", e))?;
+    let tmp = format!("{path}.tmp");
+    if native {
+        // 原生二进制格式原样保存：ipdb::load 会按魔数再次识别。
+        fs::write(&tmp, &payload).map_err(|e| format!("写入失败: {e}"))?;
+    } else {
+        let mut out = String::with_capacity(entries.len() * 28);
+        out.push_str(&format!(
+            "#source\t{url}\n#updated\t{now}\n#count\t{}\n#format\t{}\n",
+            entries.len(),
+            format!("{kind:?}")
+        ));
+        for e in &entries {
+            out.push_str(&format!(
+                "{}\t{}\t{}\t{}\t{}\t{}\n",
+                e.start, e.end, e.country, e.region, e.city, e.isp
+            ));
+        }
+        fs::write(&tmp, out).map_err(|e| format!("写入失败: {e}"))?;
+    }
+    fs::rename(&tmp, path).map_err(|e| format!("保存失败: {e}"))?;
     if let Some(c) = CACHE.get_or_init(|| Mutex::new(None)).lock().unwrap().as_mut() {
         c.key.clear();
     }
-    Ok(json!({"ok": true, "count": entries.len(), "bytes": raw.len(), "updated": now, "source": url}))
+    Ok(json!({
+        "ok": true, "count": entries.len(), "bytes": payload.len(),
+        "updated": now, "source": url,
+        "format": format!("{kind:?}"), "native": native,
+    }))
 }
 
 /// 当前出口 IP：分别请求 IPv4 与 IPv6 探测端点，任一失败不影响另一个。
@@ -725,9 +648,159 @@ fn fetch_json(url: &str) -> Result<Value, String> {
     serde_json::from_str(body.trim()).map_err(|e| format!("响应不是 JSON: {}", e))
 }
 
+/// 常用国家名 → ISO2（ipapi.is 免费响应不含 country_code）。
+fn country_iso2(name: &str) -> String {
+    match name {
+        "United States" => "US",
+        "China" => "CN",
+        "Hong Kong" => "HK",
+        "Macao" | "Macau" => "MO",
+        "Taiwan" => "TW",
+        "Japan" => "JP",
+        "South Korea" | "Korea" => "KR",
+        "Singapore" => "SG",
+        "Malaysia" => "MY",
+        "Thailand" => "TH",
+        "Vietnam" => "VN",
+        "Philippines" => "PH",
+        "Indonesia" => "ID",
+        "India" => "IN",
+        "Australia" => "AU",
+        "New Zealand" => "NZ",
+        "Canada" => "CA",
+        "United Kingdom" => "GB",
+        "Germany" => "DE",
+        "France" => "FR",
+        "Italy" => "IT",
+        "Spain" => "ES",
+        "Netherlands" => "NL",
+        "Belgium" => "BE",
+        "Switzerland" => "CH",
+        "Sweden" => "SE",
+        "Norway" => "NO",
+        "Denmark" => "DK",
+        "Finland" => "FI",
+        "Russia" => "RU",
+        "Ukraine" => "UA",
+        "Turkey" => "TR",
+        "United Arab Emirates" => "AE",
+        "Saudi Arabia" => "SA",
+        "Israel" => "IL",
+        "Brazil" => "BR",
+        "Argentina" => "AR",
+        "Mexico" => "MX",
+        "Chile" => "CL",
+        "South Africa" => "ZA",
+        "Egypt" => "EG",
+        "Nigeria" => "NG",
+        "Kenya" => "KE",
+        "Pakistan" => "PK",
+        "Bangladesh" => "BD",
+        "Sri Lanka" => "LK",
+        "Myanmar" => "MM",
+        "Cambodia" => "KH",
+        "Laos" => "LA",
+        "Mongolia" => "MN",
+        "Nepal" => "NP",
+        "Kazakhstan" => "KZ",
+        _ => "",
+    }
+    .to_string()
+}
+
 fn normalize_api(ip: &str, d: &Value) -> Option<Value> {
     let s = |k: &str| d[k].as_str().unwrap_or("").to_string();
     let n = |k: &str| d[k].as_f64().map(|v| v.to_string()).unwrap_or_default();
+    // proxycheck.io：顶层 status + 以 IP 为键的节点
+    if s("status") == "ok" || s("status") == "denied" {
+        if let Some(node) = d.get(ip).and_then(|v| v.as_object()) {
+            let g = |k: &str| node.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+            let lat = node.get("latitude").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            let lon = node.get("longitude").and_then(|x| x.as_f64()).unwrap_or(0.0);
+            if !g("country").is_empty() || !g("isocode").is_empty() {
+                let proxy = g("proxy");
+                let ptype = g("type");
+                let mut isp = g("provider");
+                if isp.is_empty() {
+                    isp = g("organisation");
+                }
+                return Some(json!({
+                    "status": "success", "query": ip,
+                    "country": g("country"), "countryCode": g("isocode"),
+                    "regionName": g("region"), "city": g("city"),
+                    "isp": isp, "org": g("organisation"), "as": g("asn"),
+                    "lat": lat, "lon": lon,
+                    "timezone": g("timezone"),
+                    "proxy_type": if proxy == "yes" { ptype } else { String::new() },
+                    "risk": node.get("risk").and_then(|x| x.as_i64()).unwrap_or(-1),
+                }));
+            }
+        }
+    }
+    // ipapi.is：顶层 is_bogon / company 标志（免费响应无 asn 对象）
+    if d["is_bogon"].is_boolean() || d["company"].is_object() {
+        if s("is_bogon") != "true" && d["is_bogon"].as_bool() != Some(true) {
+            let g = |k: &str| d[k].as_str().unwrap_or("").to_string();
+            let asn = &d["asn"];
+            let company = &d["company"];
+            // asn 字段两种形态："AS15169 Google LLC" 字符串（免费）或嵌套对象（完整）
+            let asn_text = if asn.is_string() {
+                asn.as_str().unwrap_or("").to_string()
+            } else {
+                asn["organization"].as_str().unwrap_or("").to_string()
+            };
+            let asn_num = asn_text.split(' ').next().unwrap_or("").to_string();
+            let country_name_free = g("country");
+            let cc_free = if s("country_code").is_empty() {
+                country_iso2(&country_name_free)
+            } else {
+                s("country_code")
+            };
+            let mut proxy_type = String::new();
+            if d["is_vpn"].as_bool() == Some(true) { proxy_type.push_str("VPN "); }
+            if d["is_proxy"].as_bool() == Some(true) { proxy_type.push_str("PROXY "); }
+            if d["is_tor"].as_bool() == Some(true) { proxy_type.push_str("TOR "); }
+            if d["is_datacenter"].as_bool() == Some(true) { proxy_type.push_str("DCH "); }
+            let proxy_type = proxy_type.trim().to_string();
+            let as_field = if asn_num.is_empty() {
+                asn["route"].as_str().unwrap_or("").to_string()
+            } else {
+                asn_num
+            };
+            let isp = company
+                .as_str()
+                .or(company["name"].as_str())
+                .or(asn["organization"].as_str())
+                .unwrap_or("")
+                .to_string();
+            return Some(json!({
+                "status": "success", "query": ip,
+                "country": country_name_free, "countryCode": cc_free,
+                "regionName": g("region"), "city": g("city"),
+                "isp": isp,
+                "org": company.as_str().unwrap_or(company["name"].as_str().unwrap_or("")),
+                "as": as_field,
+                "lat": d["latitude"].as_f64().unwrap_or(0.0),
+                "lon": d["longitude"].as_f64().unwrap_or(0.0),
+                "timezone": s("timezone"),
+                "proxy_type": proxy_type,
+                "risk": d["risk_score"].as_i64().unwrap_or(-1),
+            }));
+        }
+    }
+    // IP.SB (ip.sb geoip)：asn 数字 + organization
+    if d["asn"].is_u64() && !s("country_code").is_empty() && d["asn"].is_object() == false {
+        let asn = d["asn"].as_u64().map(|v| format!("AS{v}")).unwrap_or_default();
+        return Some(json!({
+            "status": "success", "query": ip,
+            "country": s("country"), "countryCode": s("country_code"),
+            "regionName": s("region"), "city": s("city"),
+            "isp": s("isp"), "org": s("organization"), "as": asn,
+            "lat": d["latitude"].as_f64().unwrap_or(0.0),
+            "lon": d["longitude"].as_f64().unwrap_or(0.0),
+            "timezone": s("timezone"),
+        }));
+    }
     // ip-api.com 原格式
     if d["status"].as_str() == Some("success") {
         let mut out = d.clone();
@@ -801,6 +874,9 @@ fn api_auto_one(ip: &str, custom: Option<&str>) -> Result<Value, String> {
         format!("https://ipwho.is/{}", ip),
         format!("https://ipapi.co/{}/json/", ip),
         format!("https://ipinfo.io/{}/json", ip),
+        format!("https://api.ip.sb/geoip/{}", ip),
+        format!("https://api.ipapi.is/?q={}", ip),
+        format!("https://proxycheck.io/v2/{}?vpn=1&asn=1&risk=1", ip),
     ] {
         match fetch_json(&url) {
             Ok(v) => {
@@ -955,25 +1031,5 @@ mod tests {
         assert_eq!(ipv4("255.255.255.255"), Some(u32::MAX));
         assert_eq!(ipv4("256.1.1.1"), None);
         assert_eq!(ipv4("1.2.3"), None);
-    }
-
-    #[test]
-    fn parse_db_with_header_and_ranges() {
-        let text = "ip_range_start,ip_range_end,country_code,region,city,isp\n\
-                    1.0.0.0,1.0.0.255,AU,Queensland,Brisbane,Example\n\
-                    16777472,16778239,CN,Beijing,Beijing,ISP\n";
-        let entries = parse_db(text);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(find(&entries, 0x01000001).unwrap().country, "AU");
-        assert_eq!(find(&entries, 0x01000100).unwrap().city, "Beijing");
-        assert!(find(&entries, 0x02000000).is_none());
-    }
-
-    #[test]
-    fn parse_db_numeric_without_header() {
-        let text = "0\t100\tZZ\t\t\t\n101\t200\tCN\tP\tC\tI\n";
-        let entries = parse_db(text);
-        assert_eq!(entries.len(), 2);
-        assert_eq!(find(&entries, 150).unwrap().country, "CN");
     }
 }

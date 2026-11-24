@@ -646,7 +646,7 @@ class SettingsPage extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Text(
-            '可直接复制，或另存为 .toml 文件。字段：upload、endpoints。',
+            '已同时包含下载（endpoints）与上传（upload）地址，可直接复制或另存为 .toml 文件。',
             style: context.text.bodySmall?.copyWith(color: context.pm.muted),
           ),
           const SizedBox(height: 10),
@@ -707,7 +707,8 @@ class SettingsPage extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text(
-              '支持 endpoints / urls 数组和 upload 字段；也可以直接粘贴 URL 列表。',
+              '自动识别 TOML：endpoints / download / urls 为下载地址，upload / upload_urls 为上传地址；'
+              '也可以直接粘贴 URL 列表（全部导入为下载地址）。',
               style: context.text.bodySmall?.copyWith(color: context.pm.muted, height: 1.45),
             ),
             const SizedBox(height: 10),
@@ -728,7 +729,7 @@ class SettingsPage extends StatelessWidget {
             PmField(
               controller: controller,
               label: 'TOML 内容 / URL 列表',
-              hint: 'upload = "https://…"\nendpoints = ["https://…"]',
+              hint: 'endpoints = ["https://…"]\nupload = ["https://…"]',
               maxLines: 10,
             ),
             const SizedBox(height: 12),
@@ -737,15 +738,20 @@ class SettingsPage extends StatelessWidget {
               icon: Icons.check_rounded,
               onPressed: () {
                 final cfg = decodeSpeedToml(controller.text);
-                if (cfg.download.isEmpty && (cfg.upload == null || cfg.upload!.isEmpty)) {
+                if (cfg.isEmpty) {
                   pmToast(context, '没有识别到可用的测速地址');
                   return;
                 }
-                store.setEndpoints(cfg.download);
+                final parts = <String>[];
+                if (cfg.download.isNotEmpty) {
+                  store.setEndpoints(cfg.download);
+                  parts.add('下载 ${cfg.download.length} 条');
+                }
                 if (cfg.uploads.isNotEmpty) {
                   store.setUploadEndpoints(cfg.uploads);
+                  parts.add('上传 ${cfg.uploads.length} 条');
                 }
-                pmToast(context, '已导入 ${cfg.download.length} 条下载地址');
+                pmToast(context, '已导入 ${parts.join('、')}');
                 Navigator.pop(context);
               },
             ),

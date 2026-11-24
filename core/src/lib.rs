@@ -7,7 +7,8 @@ mod diag;
 mod dns;
 mod download;
 mod http;
-mod ipgeo;
+pub mod ipdb;
+pub mod ipgeo;
 mod speed;
 
 use serde_json::{json, Value};

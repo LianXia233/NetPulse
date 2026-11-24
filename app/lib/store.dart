@@ -77,6 +77,7 @@ class AppStore extends ChangeNotifier {
   Color seed = kSeedColor;
   bool pureBlack = false;
   bool useMbps = true;
+  int pingCount = 20;
   int workers = 8;
   int durationSec = 15;
   int sampleMs = 1000;
@@ -128,6 +129,15 @@ class AppStore extends ChangeNotifier {
   String speedDnsMode = 'all';
   String ipdbUrl = '';
   String ipApiEndpoint = 'https://ipwho.is/{ip}';
+  static const ipApiPresets = [
+    ('ipwho.is', 'https://ipwho.is/{ip}'),
+    ('ipapi.is', 'https://api.ipapi.is/?q={ip}'),
+    ('IP.SB', 'https://api.ip.sb/geoip/{ip}'),
+    ('proxycheck.io', 'https://proxycheck.io/v2/{ip}?vpn=1&asn=1&risk=1'),
+    ('ip-api.com', 'http://ip-api.com/json/{ip}'),
+    ('ipapi.co', 'https://ipapi.co/{ip}/json/'),
+    ('ipinfo.io', 'https://ipinfo.io/{ip}/json'),
+  ];
   // 内置浏览器
   String browserHome = '';
   String browserUaMode = 'system'; // system / desktop / custom
@@ -157,6 +167,7 @@ class AppStore extends ChangeNotifier {
         seed = Color(j['seed'] as int? ?? kSeedColor.toARGB32());
         pureBlack = j['pureBlack'] == true;
         useMbps = j['useMbps'] != false;
+        pingCount = (j['pingCount'] as int? ?? 20).clamp(1, 500);
         workers = (j['workers'] as int? ?? 8).clamp(1, 64);
         durationSec = (j['durationSec'] as int? ?? 15).clamp(3, 120);
         sampleMs = (j['sampleMs'] as int? ?? 1000).clamp(100, 2000);
@@ -228,6 +239,7 @@ class AppStore extends ChangeNotifier {
       'seed': seed.toARGB32(),
       'pureBlack': pureBlack,
       'useMbps': useMbps,
+      'pingCount': pingCount,
       'workers': workers,
       'durationSec': durationSec,
       'sampleMs': sampleMs,
@@ -278,6 +290,12 @@ class AppStore extends ChangeNotifier {
 
   void setPureBlack(bool value) {
     pureBlack = value;
+    save();
+    notifyListeners();
+  }
+
+  void setPingCount(int value) {
+    pingCount = value.clamp(1, 500);
     save();
     notifyListeners();
   }
