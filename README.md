@@ -24,6 +24,7 @@
 </p>
 
 <p align="center">
+  <a href="https://lianxia233.github.io/NetPulse/">🌐 在线主页 (GitHub Pages)</a> •
   <a href="https://github.com/LianXia233/NetPulse/releases/latest">📦 立即下载 APK</a> •
   <a href="#-核心特性">✨ 核心特性</a> •
   <a href="#-系统架构">🏗️ 系统架构</a> •

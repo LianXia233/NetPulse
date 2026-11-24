@@ -1,0 +1,1063 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>NetPulse · 现代化 Android 网络测速、多线程断点下载与深度诊断套件</title>
+  <meta name="description" content="基于 Flutter 界面与 Rust 原生高性能核心的 Android 网络工具。多 CDN 测速、动态分块下载、网页直链嗅探、43 万离线 IP 归属地，端到端直连，零隐私泄漏。">
+  <link rel="icon" type="image/png" href="assets/icon.png">
+  
+  <style>
+    :root {
+      --bg: #090a0f;
+      --bg-card: rgba(18, 20, 29, 0.75);
+      --bg-card-hover: rgba(26, 30, 44, 0.85);
+      --border: rgba(255, 255, 255, 0.08);
+      --border-focus: rgba(0, 122, 255, 0.4);
+      --text: #f5f5f7;
+      --text-muted: #8e8e93;
+      --primary: #007aff;
+      --primary-glow: rgba(0, 122, 255, 0.35);
+      --accent-green: #34c759;
+      --accent-purple: #cb30e0;
+      --accent-orange: #ff9500;
+      --accent-red: #ff3b30;
+      --font: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      --radius-sm: 10px;
+      --radius-md: 18px;
+      --radius-lg: 26px;
+      --radius-full: 9999px;
+    }
+
+    [data-theme="light"] {
+      --bg: #f8f9fc;
+      --bg-card: rgba(255, 255, 255, 0.85);
+      --bg-card-hover: rgba(255, 255, 255, 0.95);
+      --border: rgba(0, 0, 0, 0.08);
+      --border-focus: rgba(0, 122, 255, 0.4);
+      --text: #1d1d1f;
+      --text-muted: #6e6e73;
+      --primary: #007aff;
+      --primary-glow: rgba(0, 122, 255, 0.2);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg);
+      color: var(--text);
+      font-family: var(--font);
+      line-height: 1.6;
+      overflow-x: hidden;
+      transition: background-color 0.3s ease, color 0.3s ease;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Ambient Glow Background */
+    .ambient-glow {
+      position: fixed;
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      z-index: -1;
+      pointer-events: none;
+    }
+    .ambient-glow::before {
+      content: '';
+      position: absolute;
+      top: -200px;
+      left: 15%;
+      width: 600px;
+      height: 600px;
+      background: radial-gradient(circle, rgba(0, 122, 255, 0.18) 0%, rgba(0, 122, 255, 0) 70%);
+      filter: blur(80px);
+    }
+    .ambient-glow::after {
+      content: '';
+      position: absolute;
+      top: 100px;
+      right: 15%;
+      width: 500px;
+      height: 500px;
+      background: radial-gradient(circle, rgba(203, 48, 224, 0.15) 0%, rgba(203, 48, 224, 0) 70%);
+      filter: blur(90px);
+    }
+
+    /* Navigation */
+    .nav {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 16px 32px;
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      background: rgba(9, 10, 15, 0.65);
+      border-bottom: 1px solid var(--border);
+    }
+    [data-theme="light"] .nav {
+      background: rgba(248, 249, 252, 0.75);
+    }
+    .nav-brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      text-decoration: none;
+      color: var(--text);
+      font-weight: 700;
+      font-size: 1.25rem;
+    }
+    .nav-logo {
+      width: 36px;
+      height: 36px;
+      border-radius: 9px;
+      box-shadow: 0 4px 12px rgba(0, 122, 255, 0.3);
+    }
+    .nav-badge {
+      font-size: 0.72rem;
+      padding: 2px 8px;
+      background: rgba(0, 122, 255, 0.15);
+      color: var(--primary);
+      border: 1px solid rgba(0, 122, 255, 0.3);
+      border-radius: var(--radius-full);
+      font-weight: 600;
+    }
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      list-style: none;
+    }
+    .nav-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.95rem;
+      font-weight: 500;
+      transition: color 0.2s;
+    }
+    .nav-links a:hover {
+      color: var(--text);
+    }
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    /* Buttons */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 20px;
+      border-radius: var(--radius-full);
+      font-size: 0.95rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      cursor: pointer;
+      border: none;
+    }
+    .btn-primary {
+      background: linear-gradient(135deg, #007aff 0%, #0056cc 100%);
+      color: #fff;
+      box-shadow: 0 4px 20px var(--primary-glow);
+    }
+    .btn-primary:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 25px rgba(0, 122, 255, 0.5);
+    }
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border);
+      backdrop-filter: blur(10px);
+    }
+    .btn-secondary:hover {
+      background: var(--bg-card-hover);
+      border-color: rgba(255, 255, 255, 0.2);
+      transform: translateY(-2px);
+    }
+    .btn-theme {
+      width: 40px;
+      height: 40px;
+      padding: 0;
+      border-radius: 50%;
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    /* Container */
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    /* Hero Section */
+    .hero {
+      padding: 90px 0 60px;
+      text-align: center;
+      position: relative;
+    }
+    .pill-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 16px;
+      background: rgba(0, 122, 255, 0.1);
+      border: 1px solid rgba(0, 122, 255, 0.25);
+      border-radius: var(--radius-full);
+      color: var(--primary);
+      font-size: 0.85rem;
+      font-weight: 600;
+      margin-bottom: 24px;
+      backdrop-filter: blur(10px);
+    }
+    .hero-title {
+      font-size: clamp(2.5rem, 6vw, 4.4rem);
+      font-weight: 800;
+      line-height: 1.15;
+      letter-spacing: -0.03em;
+      margin-bottom: 24px;
+    }
+    .gradient-text {
+      background: linear-gradient(135deg, #00f2fe 0%, #007aff 50%, #cb30e0 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero-desc {
+      max-width: 760px;
+      margin: 0 auto 36px;
+      font-size: 1.15rem;
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+    .hero-cta {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 16px;
+      flex-wrap: wrap;
+      margin-bottom: 40px;
+    }
+    .hero-badges {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+    .badge-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-full);
+    }
+
+    /* Device & Mockup Interactive Section */
+    .showcase {
+      margin: 40px auto 100px;
+      max-width: 980px;
+      perspective: 1200px;
+    }
+    .device-shell {
+      position: relative;
+      background: #151821;
+      border: 2px solid rgba(255, 255, 255, 0.15);
+      border-radius: 44px;
+      padding: 16px;
+      box-shadow: 0 30px 80px rgba(0, 0, 0, 0.6), 0 0 60px rgba(0, 122, 255, 0.15);
+      overflow: hidden;
+    }
+    .device-screen {
+      background: #0d0f17;
+      border-radius: 32px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      padding: 28px 24px 32px;
+      min-height: 480px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      position: relative;
+    }
+    .screen-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+    .screen-title {
+      font-size: 1.25rem;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .screen-status-pill {
+      font-size: 0.75rem;
+      padding: 3px 10px;
+      border-radius: var(--radius-full);
+      background: rgba(52, 199, 89, 0.15);
+      color: var(--accent-green);
+      font-weight: 600;
+    }
+
+    /* Interactive View Panes */
+    .view-pane {
+      display: none;
+      animation: fadeIn 0.3s ease forwards;
+    }
+    .view-pane.active {
+      display: block;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* View: Speed Test */
+    .speed-gauge-wrap {
+      text-align: center;
+      padding: 20px 0;
+    }
+    .speed-number {
+      font-size: 4rem;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
+      background: linear-gradient(135deg, #00f2fe 0%, #007aff 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      line-height: 1;
+    }
+    .speed-unit {
+      font-size: 1.1rem;
+      color: var(--text-muted);
+      font-weight: 600;
+      margin-top: 6px;
+    }
+    .speed-grid {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 12px;
+      margin-top: 24px;
+    }
+    .speed-stat-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 12px;
+      text-align: center;
+    }
+    .speed-stat-label {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+    }
+    .speed-stat-val {
+      font-size: 1.1rem;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+
+    /* View: Downloads */
+    .dl-card {
+      background: rgba(255, 255, 255, 0.03);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+    .dl-title-row {
+      display: flex;
+      justify-content: space-between;
+      font-weight: 600;
+      font-size: 0.95rem;
+      margin-bottom: 8px;
+    }
+    .dl-chunk-bar {
+      display: grid;
+      grid-template-columns: repeat(8, 1fr);
+      gap: 4px;
+      height: 12px;
+      margin-bottom: 10px;
+    }
+    .chunk-part {
+      border-radius: 3px;
+      background: var(--primary);
+      opacity: 0.85;
+      animation: pulse 1.5s infinite ease-in-out;
+    }
+    .chunk-part:nth-child(2) { animation-delay: 0.2s; }
+    .chunk-part:nth-child(3) { animation-delay: 0.4s; }
+    .chunk-part:nth-child(4) { animation-delay: 0.6s; }
+    .chunk-part:nth-child(5) { animation-delay: 0.8s; }
+    .chunk-part:nth-child(6) { animation-delay: 1.0s; }
+    .chunk-part:nth-child(7) { animation-delay: 1.2s; }
+    .chunk-part:nth-child(8) { animation-delay: 1.4s; background: rgba(255, 255, 255, 0.1); }
+    @keyframes pulse {
+      0%, 100% { opacity: 0.6; }
+      50% { opacity: 1; }
+    }
+    .dl-meta-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    /* View: Diagnostics */
+    .diag-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.9rem;
+    }
+    .diag-table td {
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--border);
+    }
+    .diag-table tr:last-child td {
+      border-bottom: none;
+    }
+
+    /* FlClash Floating Dock Mockup */
+    .mockup-dock-wrap {
+      margin-top: 24px;
+      display: flex;
+      justify-content: center;
+    }
+    .mockup-dock {
+      background: rgba(255, 255, 255, 0.08);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: var(--radius-full);
+      padding: 5px;
+      display: flex;
+      gap: 4px;
+      backdrop-filter: blur(16px);
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    }
+    .dock-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      padding: 8px 18px;
+      border-radius: var(--radius-full);
+      font-size: 0.88rem;
+      font-weight: 600;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .dock-btn.active {
+      background: #ffffff;
+      color: #000000;
+      box-shadow: 0 4px 12px rgba(255, 255, 255, 0.2);
+    }
+
+    /* Bento Grid Section */
+    .section-title-wrap {
+      text-align: center;
+      max-width: 700px;
+      margin: 0 auto 50px;
+    }
+    .section-badge {
+      color: var(--primary);
+      font-weight: 700;
+      font-size: 0.85rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 12px;
+    }
+    .section-title {
+      font-size: 2.3rem;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      margin-bottom: 16px;
+    }
+    .section-desc {
+      color: var(--text-muted);
+      font-size: 1.05rem;
+    }
+
+    .bento-grid {
+      display: grid;
+      grid-template-columns: repeat(12, 1fr);
+      gap: 20px;
+      margin-bottom: 100px;
+    }
+    .bento-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 32px;
+      backdrop-filter: blur(16px);
+      transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+      position: relative;
+      overflow: hidden;
+    }
+    .bento-card:hover {
+      background: var(--bg-card-hover);
+      border-color: rgba(255, 255, 255, 0.18);
+      transform: translateY(-4px);
+      box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+    }
+    .bento-col-8 { grid-column: span 8; }
+    .bento-col-4 { grid-column: span 4; }
+    .bento-col-6 { grid-column: span 6; }
+    .bento-col-12 { grid-column: span 12; }
+
+    .bento-icon {
+      width: 48px;
+      height: 48px;
+      border-radius: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.4rem;
+      margin-bottom: 20px;
+      background: rgba(0, 122, 255, 0.12);
+      border: 1px solid rgba(0, 122, 255, 0.25);
+    }
+    .bento-title {
+      font-size: 1.35rem;
+      font-weight: 700;
+      margin-bottom: 12px;
+    }
+    .bento-desc {
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      line-height: 1.6;
+    }
+
+    /* Specs & Verification */
+    .specs-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-lg);
+      padding: 36px;
+      margin-bottom: 100px;
+    }
+    .spec-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 24px;
+      margin-top: 24px;
+    }
+    .spec-item {
+      border-left: 2px solid var(--primary);
+      padding-left: 14px;
+    }
+    .spec-key {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      font-weight: 600;
+    }
+    .spec-value {
+      font-size: 1.05rem;
+      font-weight: 700;
+      margin-top: 4px;
+    }
+
+    .fingerprint-box {
+      margin-top: 28px;
+      background: rgba(0, 0, 0, 0.35);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-md);
+      padding: 16px 20px;
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 0.85rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      word-break: break-all;
+    }
+
+    /* Footer */
+    .footer {
+      border-top: 1px solid var(--border);
+      padding: 50px 0 40px;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+    .footer-wrap {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 20px;
+    }
+    .footer-links {
+      display: flex;
+      gap: 20px;
+    }
+    .footer-links a {
+      color: var(--text-muted);
+      text-decoration: none;
+      transition: color 0.2s;
+    }
+    .footer-links a:hover {
+      color: var(--text);
+    }
+
+    /* Responsive */
+    @media (max-width: 900px) {
+      .bento-col-8, .bento-col-4, .bento-col-6 {
+        grid-column: span 12;
+      }
+      .nav-links {
+        display: none;
+      }
+      .hero-title {
+        font-size: 2.4rem;
+      }
+      .speed-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Ambient Glow -->
+  <div class="ambient-glow"></div>
+
+  <!-- Navigation -->
+  <header class="nav">
+    <a href="#" class="nav-brand">
+      <img src="assets/icon.png" alt="NetPulse Logo" class="nav-logo">
+      <span>NetPulse</span>
+      <span class="nav-badge" id="nav-ver-pill">v1.1.1</span>
+    </a>
+    
+    <ul class="nav-links">
+      <li><a href="#features">核心特性</a></li>
+      <li><a href="#simulator">在线预览</a></li>
+      <li><a href="#architecture">架构与参数</a></li>
+      <li><a href="#verification">证书校验</a></li>
+      <li><a href="架构说明.md">架构文档</a></li>
+    </ul>
+
+    <div class="nav-actions">
+      <button class="btn btn-theme" id="theme-btn" title="切换明暗主题">🌓</button>
+      <a href="https://github.com/LianXia233/NetPulse" target="_blank" class="btn btn-secondary">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        <span>GitHub</span>
+      </a>
+      <a href="https://github.com/LianXia233/NetPulse/releases/latest" id="top-download-btn" class="btn btn-primary">
+        <span>下载 APK</span>
+      </a>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="hero container">
+    <div class="pill-tag">
+      <span>⚡</span>
+      <span id="hero-tag-text">全新发布 · FlClash 悬浮胶囊导航坞 + 动态分段引擎</span>
+    </div>
+
+    <h1 class="hero-title">
+      现代化 Android<br>
+      <span class="gradient-text">测速 · 极速下载 · 深度网络诊断</span>
+    </h1>
+
+    <p class="hero-desc">
+      基于 <strong>Flutter 响应式界面</strong> 与 <strong>Rust 原生高性能核心</strong>。多 CDN 轮询、动态分段断点续传、网页直链嗅探与 43 万条离线 IP 归属地库，端到端直接通信，纯粹零追踪。
+    </p>
+
+    <div class="hero-cta">
+      <a href="https://github.com/LianXia233/NetPulse/releases/latest" id="hero-dl-btn" class="btn btn-primary" style="padding: 14px 32px; font-size: 1.05rem;">
+        <span>📥 立即下载正式版 APK</span>
+        <span id="hero-dl-size" style="opacity: 0.8; font-weight: 400; font-size: 0.85rem;"></span>
+      </a>
+      <a href="#simulator" class="btn btn-secondary" style="padding: 14px 28px;">
+        <span>📱 在线体验预览</span>
+      </a>
+      <a href="https://github.com/LianXia233/NetPulse" target="_blank" class="btn btn-secondary" style="padding: 14px 24px;">
+        <span>⭐ Star 仓库</span>
+      </a>
+    </div>
+
+    <div class="hero-badges">
+      <span class="badge-chip">🤖 Android 7.0+ (API 24+)</span>
+      <span class="badge-chip">⚡ 16 KB 内存页对齐 (Android 15+)</span>
+      <span class="badge-chip">🚀 arm64-v8a / armeabi-v7a</span>
+      <span class="badge-chip">🛡️ 零账号 · 零中转 · 零追踪</span>
+      <span class="badge-chip">📜 MIT License</span>
+    </div>
+  </section>
+
+  <!-- Interactive Device Showcase -->
+  <section class="showcase container" id="simulator">
+    <div class="device-shell">
+      <div class="device-screen">
+        
+        <!-- Screen Top Bar -->
+        <div class="screen-header">
+          <div class="screen-title" id="pane-title">
+            <span>⚡</span>
+            <span>多 CDN 并发测速</span>
+          </div>
+          <span class="screen-status-pill">● 连接正常 (Rust Core 直连)</span>
+        </div>
+
+        <!-- Pane 1: Speed Test -->
+        <div class="view-pane active" id="pane-speed">
+          <div class="speed-gauge-wrap">
+            <div class="speed-number" id="live-speed-val">486.2</div>
+            <div class="speed-unit">Mbps · 下行稳态吞吐</div>
+          </div>
+          <div class="speed-grid">
+            <div class="speed-stat-card">
+              <div class="speed-stat-label">峰值速率</div>
+              <div class="speed-stat-val" style="color: var(--primary);">538.0 M</div>
+            </div>
+            <div class="speed-stat-card">
+              <div class="speed-stat-label">连接延迟</div>
+              <div class="speed-stat-val" style="color: var(--accent-green);">16 ms</div>
+            </div>
+            <div class="speed-stat-card">
+              <div class="speed-stat-label">并发线路</div>
+              <div class="speed-stat-val">16 线程</div>
+            </div>
+            <div class="speed-stat-card">
+              <div class="speed-stat-label">采样间隔</div>
+              <div class="speed-stat-val">200 ms</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pane 2: Downloads -->
+        <div class="view-pane" id="pane-download">
+          <div class="dl-card">
+            <div class="dl-title-row">
+              <span>Ubuntu-24.04-desktop-arm64.iso</span>
+              <span style="color: var(--accent-green);">88.4 MB/s</span>
+            </div>
+            <div class="dl-chunk-bar">
+              <div class="chunk-part"></div>
+              <div class="chunk-part"></div>
+              <div class="chunk-part"></div>
+              <div class="chunk-part"></div>
+              <div class="chunk-part"></div>
+              <div class="chunk-part"></div>
+              <div class="chunk-part"></div>
+              <div class="chunk-part"></div>
+            </div>
+            <div class="dl-meta-row">
+              <span>分块: 8 / 8 · 多 CDN 容灾镜像轮询接管</span>
+              <span>2.18 GB / 2.60 GB (84%)</span>
+            </div>
+          </div>
+
+          <div class="dl-card" style="opacity: 0.85;">
+            <div class="dl-title-row">
+              <span>NetPulse-1.1.1.apk</span>
+              <span style="color: var(--primary);">已完成</span>
+            </div>
+            <div class="dl-meta-row">
+              <span>区间完整性校验: [0, size) 覆盖无空洞</span>
+              <span>SHA-256 校验通过 · fsync 刷盘</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Pane 3: Diagnostics -->
+        <div class="view-pane" id="pane-diag">
+          <table class="diag-table">
+            <tr>
+              <td><strong>TCP Ping 往返测试</strong></td>
+              <td>1.1.1.1 (Cloudflare Anycast)</td>
+              <td style="color: var(--accent-green); text-align: right;">18 ms</td>
+            </tr>
+            <tr>
+              <td><strong>DNS A/AAAA 多服解析</strong></td>
+              <td>119.29.29.29 vs 223.5.5.5</td>
+              <td style="color: var(--primary); text-align: right;">9 ms / 12 ms</td>
+            </tr>
+            <tr>
+              <td><strong>STUN NAT 穿透诊断</strong></td>
+              <td>RFC 3489 / RFC 5389</td>
+              <td style="color: var(--accent-orange); text-align: right;">Full Cone NAT</td>
+            </tr>
+            <tr>
+              <td><strong>原生 iperf3 打流引擎</strong></td>
+              <td>TCP / UDP 吞吐极限压测</td>
+              <td style="color: var(--text-muted); text-align: right;">待命 (API 28+)</td>
+            </tr>
+          </table>
+        </div>
+
+        <!-- Pane 4: Dashboard Overview -->
+        <div class="view-pane" id="pane-dash">
+          <div class="speed-grid" style="grid-template-columns: repeat(2, 1fr); margin-top: 0;">
+            <div class="speed-stat-card" style="text-align: left;">
+              <div class="speed-stat-label">当前局域网 IPv4</div>
+              <div class="speed-stat-val">192.168.1.108</div>
+              <div class="speed-stat-label" style="margin-top: 6px;">链路协商速率: 1200 Mbps (Wi-Fi 6)</div>
+            </div>
+            <div class="speed-stat-card" style="text-align: left;">
+              <div class="speed-stat-label">公网出口 IP (离线库识别)</div>
+              <div class="speed-stat-val" style="color: var(--primary);">124.78.x.x</div>
+              <div class="speed-stat-label" style="margin-top: 6px;">中国 · 上海市 (电信 AS4812)</div>
+            </div>
+          </div>
+          <div style="margin-top: 16px; padding: 14px; background: rgba(0, 122, 255, 0.08); border-radius: 12px; font-size: 0.85rem; color: var(--text-muted);">
+            💡 内置 43 万条 DB-IP 离线国家段，首次查询 0 毫秒响应，不产生任何网络查询请求。
+          </div>
+        </div>
+
+        <!-- FlClash Floating Dock Simulator -->
+        <div class="mockup-dock-wrap">
+          <div class="mockup-dock">
+            <button class="dock-btn" data-target="pane-dash"><span>📡</span> 概览</button>
+            <button class="dock-btn active" data-target="pane-speed"><span>⚡</span> 测速</button>
+            <button class="dock-btn" data-target="pane-download"><span>⬇️</span> 下载</button>
+            <button class="dock-btn" data-target="pane-diag"><span>🩺</span> 工具箱</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+  <!-- Bento Grid Features -->
+  <section class="container" id="features">
+    <div class="section-title-wrap">
+      <div class="section-badge">Features</div>
+      <h2 class="section-title">硬核架构与现代交互的融合</h2>
+      <p class="section-desc">打破传统 Android 网络工具臃肿、广告泛滥与中间代理转发的痛点，打造纯粹高效的终端工具。</p>
+    </div>
+
+    <div class="bento-grid">
+      
+      <!-- Card 1: Rust Core -->
+      <div class="bento-card bento-col-8">
+        <div class="bento-icon" style="color: #ff9500; background: rgba(255, 149, 0, 0.12); border-color: rgba(255, 149, 0, 0.25);">⚡</div>
+        <h3 class="bento-title">Rust 原生双核驱动 · 零 GC 极致吞吐</h3>
+        <p class="bento-desc">
+          所有耗时的测速打流、DNS 并发轮询、动态分块多线程写入与 TLS 协议栈，完全由自研 Rust 引擎（<code>libnetpulse_core.so</code>）在宿主直接执行。通过 JSON-over-FFI 与 110ms 增量轮询向 Flutter 上报数据。严格适配 <strong>Android 15+ 16 KB 内存页对齐</strong> 规范。
+        </p>
+      </div>
+
+      <!-- Card 2: FlClash Floating Dock -->
+      <div class="bento-card bento-col-4">
+        <div class="bento-icon" style="color: #007aff;">🎨</div>
+        <h3 class="bento-title">FlClash 悬浮胶囊导航</h3>
+        <p class="bento-desc">
+          底部留白悬浮药丸 Dock，独创滑动透镜（Sliding Lens）、横向拖拽跟手与弹性物理动效。精炼四大主标签，支持 AMOLED 纯黑与八色主题调色。
+        </p>
+      </div>
+
+      <!-- Card 3: Dynamic Download Engine -->
+      <div class="bento-card bento-col-6">
+        <div class="bento-icon" style="color: #34c759; background: rgba(52, 199, 89, 0.12); border-color: rgba(52, 199, 89, 0.25);">⬇️</div>
+        <h3 class="bento-title">动态分块与慢段对半拆分算法</h3>
+        <p class="bento-desc">
+          支持 1–32 并发连接、64 KB–8 MB 动态分块切分。运行中遇慢速连接段自动对半拆分抢占带宽，无碎片空洞。多 CDN 镜像故障自动接管轮询，断点元数据（<code>.pmdown.json</code>）强校验。
+        </p>
+      </div>
+
+      <!-- Card 4: Web Sniffer -->
+      <div class="bento-card bento-col-6">
+        <div class="bento-icon" style="color: #cb30e0; background: rgba(203, 48, 224, 0.12); border-color: rgba(203, 48, 224, 0.25);">🌐</div>
+        <h3 class="bento-title">内置浏览器直链嗅探与鉴权透传</h3>
+        <p class="bento-desc">
+          基于 Android System WebView，正常浏览网页的同时自动嗅探直链。支持一键将页面 Cookie、User-Agent、Referer 及鉴权标头注入下载器，跨域自动清洗避免凭据泄漏。
+        </p>
+      </div>
+
+      <!-- Card 5: Full Diagnostics -->
+      <div class="bento-card bento-col-4">
+        <div class="bento-icon" style="color: #ff3b30; background: rgba(255, 59, 48, 0.12); border-color: rgba(255, 59, 48, 0.25);">🩺</div>
+        <h3 class="bento-title">多维网络体检工具</h3>
+        <p class="bento-desc">
+          TCP Ping 纳秒往返测试、DNS A/AAAA 多服务器解析横向对比、STUN NAT 穿透类型检测以及内置 <code>libiperf3.so</code> 原生打流压测。
+        </p>
+      </div>
+
+      <!-- Card 6: Offline IP DB -->
+      <div class="bento-card bento-col-4">
+        <div class="bento-icon" style="color: #00f2fe; background: rgba(0, 242, 254, 0.12); border-color: rgba(0, 242, 254, 0.25);">🗺️</div>
+        <h3 class="bento-title">43 万条离线 IP 归属地</h3>
+        <p class="bento-desc">
+          内置 DB-IP 离线国家段种子库，零 IO 毫秒级二分匹配。支持在线 CSV/GZ 热更新原子替换，可配置自定义查询 API。
+        </p>
+      </div>
+
+      <!-- Card 7: Zero Privacy Leaks -->
+      <div class="bento-card bento-col-4">
+        <div class="bento-icon" style="color: #34c759; background: rgba(52, 199, 89, 0.12); border-color: rgba(52, 199, 89, 0.25);">🛡️</div>
+        <h3 class="bento-title">纯粹零数据隐私泄漏</h3>
+        <p class="bento-desc">
+          无任何第三方统计或广告 SDK，无账号体系。流量直连目标服务，敏感 Cookie / Authorization 物理隔离在应用私有沙盒。
+        </p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Technical Specs & Verification -->
+  <section class="container" id="architecture">
+    <div class="specs-card" id="verification">
+      <div class="section-badge">Specifications & Verification</div>
+      <h2 style="font-size: 1.8rem; font-weight: 800; margin-bottom: 8px;">系统构建规范与发布证书</h2>
+      <p style="color: var(--text-muted); font-size: 0.95rem;">
+        NetPulse 的每一次 CI 构建均在 GitHub Actions 独立容器中通过发布签名并比对指纹，确保分发产物真实不可篡改。
+      </p>
+
+      <div class="spec-grid">
+        <div class="spec-item">
+          <div class="spec-key">最低系统版本</div>
+          <div class="spec-value">Android 7.0 (minSdk 24)</div>
+        </div>
+        <div class="spec-item">
+          <div class="spec-key">目标与编译 SDK</div>
+          <div class="spec-value">Android 16 (compileSdk 36)</div>
+        </div>
+        <div class="spec-item">
+          <div class="spec-key">原生工具链</div>
+          <div class="spec-value">NDK 28.2.13676358</div>
+        </div>
+        <div class="spec-item">
+          <div class="spec-key">内存页对齐</div>
+          <div class="spec-value">16 KB Page Aligned</div>
+        </div>
+      </div>
+
+      <div style="margin-top: 24px;">
+        <div style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted); margin-bottom: 8px;">
+          官方发布证书指纹（SHA-256）
+        </div>
+        <div class="fingerprint-box">
+          <span id="fp-text">118ea38fc17a465dce8fe2c7657d0b4d3c7273e6379f3a0a9b73f5f80a106d6b</span>
+          <button class="btn btn-secondary" style="padding: 6px 14px; font-size: 0.78rem;" id="copy-fp-btn">复制指纹</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer container">
+    <div class="footer-wrap">
+      <div>
+        <p><strong>NetPulse</strong> · 现代 Android 网络测速与下载工具套件</p>
+        <p style="font-size: 0.8rem; margin-top: 4px;">开源基于 MIT License · 离线归属地基于 DB-IP (CC BY 4.0)</p>
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/LianXia233/NetPulse">GitHub 源码</a>
+        <a href="https://github.com/LianXia233/NetPulse/releases">版本发布</a>
+        <a href="架构说明.md">技术架构</a>
+        <a href="../THIRD_PARTY_NOTICES.md">第三方声明</a>
+        <a href="https://github.com/LianXia233/NetPulse/issues">提交反馈</a>
+      </div>
+    </div>
+  </footer>
+
+  <!-- Scripts -->
+  <script>
+    // Theme Switcher
+    const themeBtn = document.getElementById('theme-btn');
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+    let currentTheme = localStorage.getItem('np_theme') || (prefersDark ? 'dark' : 'dark');
+    document.documentElement.setAttribute('data-theme', currentTheme);
+
+    themeBtn.addEventListener('click', () => {
+      currentTheme = currentTheme === 'dark' ? 'light' : 'dark';
+      document.documentElement.setAttribute('data-theme', currentTheme);
+      localStorage.setItem('np_theme', currentTheme);
+    });
+
+    // Mockup Tab Switcher
+    const dockBtns = document.querySelectorAll('.dock-btn');
+    const panes = document.querySelectorAll('.view-pane');
+    const paneTitle = document.getElementById('pane-title');
+
+    const titles = {
+      'pane-dash': '<span>📡</span> <span>网络概览与拓扑</span>',
+      'pane-speed': '<span>⚡</span> <span>多 CDN 并发测速</span>',
+      'pane-download': '<span>⬇️</span> <span>动态分块下载调度</span>',
+      'pane-diag': '<span>🩺</span> <span>全方位网络体检</span>'
+    };
+
+    dockBtns.forEach(btn => {
+      btn.addEventListener('click', () => {
+        dockBtns.forEach(b => b.classList.remove('active'));
+        panes.forEach(p => p.classList.remove('active'));
+
+        btn.classList.add('active');
+        const targetId = btn.getAttribute('data-target');
+        const targetPane = document.getElementById(targetId);
+        if (targetPane) {
+          targetPane.classList.add('active');
+          paneTitle.innerHTML = titles[targetId] || 'NetPulse';
+        }
+      });
+    });
+
+    // Speed dial animation
+    const speedVal = document.getElementById('live-speed-val');
+    if (speedVal) {
+      setInterval(() => {
+        const base = 480;
+        const jitter = (Math.random() * 25 - 12).toFixed(1);
+        speedVal.textContent = (base + parseFloat(jitter)).toFixed(1);
+      }, 700);
+    }
+
+    // Copy Fingerprint
+    const copyBtn = document.getElementById('copy-fp-btn');
+    const fpText = document.getElementById('fp-text');
+    if (copyBtn && fpText) {
+      copyBtn.addEventListener('click', () => {
+        navigator.clipboard.writeText(fpText.textContent.trim()).then(() => {
+          copyBtn.textContent = '已复制!';
+          setTimeout(() => { copyBtn.textContent = '复制指纹'; }, 2000);
+        });
+      });
+    }
+
+    // Fetch Latest GitHub Release for accurate download CTA
+    async function loadRelease() {
+      try {
+        const res = await fetch('https://api.github.com/repos/LianXia233/NetPulse/releases/latest');
+        if (!res.ok) return;
+        const data = await res.json();
+        if (data.tag_name) {
+          document.getElementById('nav-ver-pill').textContent = data.tag_name;
+        }
+        const apkAsset = data.assets && data.assets.find(a => a.name.endsWith('.apk'));
+        if (apkAsset) {
+          const sizeMb = (apkAsset.size / (1024 * 1024)).toFixed(1);
+          const dlBtn = document.getElementById('hero-dl-btn');
+          const sizeSpan = document.getElementById('hero-dl-size');
+          dlBtn.href = apkAsset.browser_download_url;
+          sizeSpan.textContent = `(${apkAsset.name} · ${sizeMb} MB)`;
+          document.getElementById('top-download-btn').href = apkAsset.browser_download_url;
+        }
+      } catch (e) {
+        console.warn('GitHub API rate limited or offline:', e);
+      }
+    }
+    loadRelease();
+  </script>
+</body>
+</html>
