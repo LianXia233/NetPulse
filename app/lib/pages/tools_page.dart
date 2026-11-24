@@ -374,6 +374,7 @@ class _DnsPanelState extends State<DnsPanel> {
   final _host = TextEditingController(text: 'www.baidu.com');
   CoreTask? _task;
   final List<Map<String, dynamic>> _rows = [];
+  int _seen = 0;
 
   @override
   void dispose() {
@@ -386,12 +387,14 @@ class _DnsPanelState extends State<DnsPanel> {
   void _onTask() {
     final t = _task;
     if (t == null || !mounted) return;
-    for (final e in t.events) {
+    for (var i = _seen; i < t.events.length; i++) {
+      final e = t.events[i];
       if (e['type'] == 'result' || e['type'] == 'error') {
         _rows.add(e);
         if (_rows.length > 80) _rows.removeAt(0);
       }
     }
+    _seen = t.events.length;
     setState(() {});
     if (!t.running) _task?.removeListener(_onTask);
   }
@@ -400,6 +403,7 @@ class _DnsPanelState extends State<DnsPanel> {
     final host = _host.text.trim();
     if (host.isEmpty) return;
     _rows.clear();
+    _seen = 0;
     final task = CoreTask.start('dns', {
       'host': host,
       'servers': normalizeDnsList(AppScope.of(context).dnsServers),
@@ -844,6 +848,7 @@ class _IperfPanelState extends State<IperfPanel> {
   final _duration = TextEditingController(text: '10');
   CoreTask? _task;
   final List<String> _lines = [];
+  int _seen = 0;
 
   @override
   void dispose() {
@@ -859,13 +864,15 @@ class _IperfPanelState extends State<IperfPanel> {
   void _onTask() {
     final t = _task;
     if (t == null || !mounted) return;
-    for (final e in t.events) {
+    for (var i = _seen; i < t.events.length; i++) {
+      final e = t.events[i];
       if (e['type'] == 'line' && e['line'] != null) {
         _lines.add(e['line'].toString());
         if (_lines.length > 400) _lines.removeAt(0);
       }
       if (e['type'] == 'error') _lines.add('ERROR: ${e['message']}');
     }
+    _seen = t.events.length;
     setState(() {});
     if (!t.running) _task?.removeListener(_onTask);
   }
@@ -893,6 +900,7 @@ class _IperfPanelState extends State<IperfPanel> {
             _duration.text.trim().isEmpty ? '10' : _duration.text.trim(),
           ];
     _lines.clear();
+    _seen = 0;
     _task?.removeListener(_onTask);
     _task?.dispose();
     final task = CoreTask.start('iperf', {

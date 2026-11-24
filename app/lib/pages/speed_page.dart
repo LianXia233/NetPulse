@@ -22,6 +22,7 @@ class _SpeedPageState extends State<SpeedPage> {
   final List<String> _errors = [];
   double _peak = 0;
   double _avgWindow = 0;
+  int _seen = 0;
 
   @override
   void dispose() {
@@ -33,7 +34,8 @@ class _SpeedPageState extends State<SpeedPage> {
   void _onTask() {
     final t = _task;
     if (t == null || !mounted) return;
-    for (final e in t.events) {
+    for (var i = _seen; i < t.events.length; i++) {
+      final e = t.events[i];
       if (e['type'] == 'route') {
         final idx = e['idx'];
         if (!_routes.any((r) => r['idx'] == idx)) _routes.add(e);
@@ -42,6 +44,7 @@ class _SpeedPageState extends State<SpeedPage> {
         _errors.add(e['message']?.toString() ?? '');
       }
     }
+    _seen = t.events.length;
     if (t.samples.isNotEmpty) {
       final v = t.lastSmoothMbps;
       if (_series.isEmpty || (v - _series.last).abs() > 0.01) {
@@ -90,6 +93,7 @@ class _SpeedPageState extends State<SpeedPage> {
     _errors.clear();
     _peak = 0;
     _avgWindow = 0;
+    _seen = 0;
     final task = CoreTask.start('speed', {
       'mode': _mode,
       'endpoints': _mode == 'upload' ? store.uploadEndpoints : store.speedEndpoints,
