@@ -7,7 +7,8 @@ void main() {
 
   test('内置站点解析器清单可加载且匹配规则正确', () async {
     final plugins = await SitePlugin.all();
-    expect(plugins.length, 6);
+    // 只约束「内置插件至少包含这些」，新增解析器不需要同步改这里。
+    expect(plugins.length, greaterThanOrEqualTo(6));
     expect(
       plugins.map((p) => p.id),
       containsAll(<String>[
@@ -17,7 +18,14 @@ void main() {
         'accountdl',
         'musicdl',
         'bilibili',
+        'anime-sites',
       ]),
+    );
+
+    // 清单不应出现重复 id
+    expect(
+      plugins.map((p) => p.id).toSet().length,
+      plugins.length,
     );
 
     final m3u8 = plugins.firstWhere((p) => p.id == 'm3u8-pro');
@@ -46,6 +54,10 @@ void main() {
     expect(bili.matches('https://www.bilibili.com/video/BV1xx411c7mD'), isTrue);
     expect(bili.matches('https://b23.tv/abc'), isTrue);
     expect(bili.matches('https://www.bilibili.com/'), isFalse);
+
+    // 页面级解析器按站点匹配，不应落到任意资源直链上抢 m3u8-pro 的活。
+    final anime = plugins.firstWhere((p) => p.id == 'anime-sites');
+    expect(anime.matches('https://cdn.example.com/live/index.m3u8'), isFalse);
   });
 
   test('插件设置默认值与布尔/数字类型转换', () async {
