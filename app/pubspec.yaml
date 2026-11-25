@@ -28,3 +28,4 @@ flutter:
     - assets/plugins/accountdl/page/
     - assets/plugins/musicdl/
     - assets/plugins/bilibili/
+    - assets/plugins/anime-sites/

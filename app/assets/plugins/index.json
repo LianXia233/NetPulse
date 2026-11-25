@@ -1,5 +1,36 @@
 [
   {
+    "id": "anime-sites",
+    "identity": "netpulse@anime-sites",
+    "name": "动漫站点页面解析",
+    "version": "1.0.0",
+    "description": "在番剧详情页或播放页直接解析出真实播放列表，并把 Referer、User-Agent 等请求参数一并交给下载引擎，覆盖内联播放器配置、加密配置、分片加密与 Next.js 数据站点。",
+    "homepage": "https://github.com/LianXia233/NetPulse",
+    "match": [
+      "*://*.mutedm.com/*",
+      "*://mutedm.com/*",
+      "*://*.xifanacg.com/*",
+      "*://xifanacg.com/*",
+      "*://*.girigirilove.com/*",
+      "*://girigirilove.com/*",
+      "*://*.fsdm02.com/*",
+      "*://fsdm02.com/*",
+      "*://*.2rk.cc/*",
+      "*://2rk.cc/*"
+    ],
+    "entry": "resolve.js",
+    "timeoutMs": 30000,
+    "settings": [
+      {
+        "key": "injectReferer",
+        "title": "补齐 Referer",
+        "description": "把当前页面地址作为 Referer 交给下载引擎，用于通过常见防盗链校验；关闭后只透传 User-Agent 与 Cookie。",
+        "type": "boolean",
+        "default": "true"
+      }
+    ]
+  },
+  {
     "id": "m3u8-pro",
     "identity": "community@m3u8-pro",
     "name": "M3U8 超级下载器 Pro",

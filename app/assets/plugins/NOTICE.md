@@ -11,6 +11,7 @@
 | `accountdl` | https://github.com/zerx-lab/fluxdown-plugin-accountdl | 上游未声明 |
 | `musicdl` | https://github.com/zerx-lab/fluxdown-plugin-musicdl | 上游未声明 |
 | `bilibili` | https://github.com/gulanthys/fluxdown-bilibili-bangumi | 上游未声明 |
+| `anime-sites` | 本项目自研 | 随项目 LICENSE |
 
 `accountdl` 与 `musicdl` 取自其 GitHub Release 中的 `.fxplug` 构建产物。若需要
 二次分发，请先向上游作者确认授权，或用 `assets/plugins/index.json` 中的规则

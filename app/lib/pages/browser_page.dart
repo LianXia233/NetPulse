@@ -1380,7 +1380,7 @@ $body
               ),
               const SizedBox(height: 10),
               Text(
-                '已内置 M3U8 画质、GitHub 加速、B 站、夸克分享、全网音乐与网盘账号直链解析器。'
+                '已内置 M3U8 画质、GitHub 加速、B 站、夸克分享、全网音乐、网盘账号与动漫站点页面解析器。'
                 'Cookie 直接取自当前浏览器登录态，只在本机使用。',
                 style: ctx.text.bodySmall?.copyWith(
                   color: ctx.pm.muted,
