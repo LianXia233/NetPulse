@@ -339,3 +339,17 @@ String formatLatency(num ms) {
   if (ms < 10) return ms.toStringAsFixed(2);
   return ms.toStringAsFixed(ms < 100 ? 1 : 0);
 }
+
+/// 把剩余秒数写成紧凑文案：不到 1 分钟用「45 秒」，否则用 mm:ss / h:mm:ss。
+/// 概览里四列并排，长文案会被压得过小，这里优先保证宽度可控。
+String formatEta(num seconds) {
+  if (seconds.isNaN || seconds <= 0) return '--';
+  final s = seconds.round();
+  if (s < 60) return '$s 秒';
+  final h = s ~/ 3600;
+  final m = (s % 3600) ~/ 60;
+  final sec = s % 60;
+  final two = sec.toString().padLeft(2, '0');
+  if (h <= 0) return '$m:$two';
+  return '$h:${m.toString().padLeft(2, '0')}:$two';
+}

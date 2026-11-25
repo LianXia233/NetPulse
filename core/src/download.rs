@@ -38,6 +38,11 @@ pub struct WorkerStat {
     pub chunks: AtomicU64,
     pub state: Mutex<String>,
     pub last_error: Mutex<String>,
+    /// 该线程首次拿到分段时的 UNIX 毫秒时间戳；0 表示尚未开始。
+    /// 详情页据此计算平均速度，和瞬时速度一起展示。
+    pub started_ms: AtomicU64,
+    /// 该线程累计的失败次数（含自动重试），用于区分「慢」和「不稳」。
+    pub errs: AtomicU64,
 }
 
 impl WorkerStat {
@@ -53,6 +58,8 @@ impl WorkerStat {
             chunks: AtomicU64::new(0),
             state: Mutex::new("待命".into()),
             last_error: Mutex::new(String::new()),
+            started_ms: AtomicU64::new(0),
+            errs: AtomicU64::new(0),
         }
     }
 }
@@ -889,6 +896,14 @@ fn run(
                 continue;
             }
             *stat.state.lock().unwrap() = "下载中".into();
+            // 只记第一次，后续分段接续不改写，平均速度才不会被工作线程复用摊薄。
+            if stat.started_ms.load(Ordering::Relaxed) == 0 {
+                let now = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                stat.started_ms.store(now, Ordering::Relaxed);
+            }
             let mut extra = 0u32;
             let result = loop {
                 let r = download_chunk(
@@ -912,6 +927,7 @@ fn run(
                 match r {
                     Err(e) if extra < 3 && !cancel.load(Ordering::Relaxed) => {
                         extra += 1;
+                        stat.errs.fetch_add(1, Ordering::Relaxed);
                         *stat.last_error.lock().unwrap() = e;
                         thread::sleep(Duration::from_millis(250));
                     }
@@ -925,6 +941,7 @@ fn run(
                 }
                 Err(e) => {
                     *stat.state.lock().unwrap() = "失败".into();
+                    stat.errs.fetch_add(1, Ordering::Relaxed);
                     *stat.last_error.lock().unwrap() = e.clone();
                     task.emit(json!({"type": "chunk_error", "index": idx, "message": e}));
                     let attempt = {
@@ -2052,17 +2069,28 @@ pub fn detail(args: &Value) -> Result<Value, String> {
             })
         })
         .collect();
-    let workers: Vec<Value> = state.workers.lock().unwrap().iter().map(|w| json!({
-        "id": w.id,
-        "ip": *w.ip.lock().unwrap(),
-        "dns": *w.dns.lock().unwrap(),
-        "cdn": *w.cdn.lock().unwrap(),
-        "bytes": w.bytes.load(Ordering::Relaxed),
-        "mbps": (w.speed_kbps.load(Ordering::Relaxed) as f64) / 100.0,
-        "chunks": w.chunks.load(Ordering::Relaxed),
-        "state": *w.state.lock().unwrap(),
-        "last_error": *w.last_error.lock().unwrap(),
-    })).collect();
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let workers: Vec<Value> = state.workers.lock().unwrap().iter().map(|w| {
+        let started = w.started_ms.load(Ordering::Relaxed);
+        // 已工作时长（毫秒）；未开始的行为 0，前端据此隐藏平均速度。
+        let elapsed_ms = if started == 0 { 0 } else { now_ms.saturating_sub(started) };
+        json!({
+            "id": w.id,
+            "ip": *w.ip.lock().unwrap(),
+            "dns": *w.dns.lock().unwrap(),
+            "cdn": *w.cdn.lock().unwrap(),
+            "bytes": w.bytes.load(Ordering::Relaxed),
+            "mbps": (w.speed_kbps.load(Ordering::Relaxed) as f64) / 100.0,
+            "chunks": w.chunks.load(Ordering::Relaxed),
+            "state": *w.state.lock().unwrap(),
+            "last_error": *w.last_error.lock().unwrap(),
+            "elapsed_ms": elapsed_ms,
+            "errs": w.errs.load(Ordering::Relaxed),
+        })
+    }).collect();
     let cdn: Vec<Value> = state.cdn.lock().unwrap().iter().map(|e| json!({
         "url": e.url, "ip": e.ip, "dns": e.dns, "ms": e.ms
     })).collect();

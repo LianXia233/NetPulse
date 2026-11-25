@@ -3,8 +3,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../bridge.dart';
+import '../download_task_ops.dart';
 import '../ip_geo_widgets.dart';
 import '../page_kit.dart';
+import '../store.dart';
 import '../theme.dart';
 import '../widgets.dart';
 
@@ -13,12 +15,14 @@ class DownloadDetailPage extends StatefulWidget {
     super.key,
     required this.id,
     this.name = '',
+    this.dir = '',
     this.snapshot,
     this.onResume,
   });
 
   final String id;
   final String name;
+  final String dir;
   final Map<String, dynamic>? snapshot;
   final Future<String?> Function()? onResume;
 
@@ -77,6 +81,37 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
     }
   }
 
+  /// 删除当前任务：先探测磁盘产物，再让用户决定是否连文件一起删。
+  Future<void> _deleteTask() async {
+    final store = AppScope.of(context);
+    final d = _data ?? widget.snapshot;
+    final item = <String, dynamic>{
+      'id': widget.id,
+      'url': d?['url']?.toString() ?? '',
+      'name': (d?['name'] ?? widget.name).toString(),
+      'dir': widget.dir.isNotEmpty ? widget.dir : store.downloadDirEffective,
+      'live': _data != null,
+      if (d?['path'] != null) 'path': d!['path'],
+      if (d?['data_file'] != null) 'data_file': d!['data_file'],
+      if (d?['meta_file'] != null) 'meta_file': d!['meta_file'],
+    };
+    final files = await probeTaskFiles(item, store.downloadDirEffective);
+    if (!mounted) return;
+    final withFile = await askDeleteTask(context, files);
+    if (withFile == null || !mounted) return;
+    final freed = await removeTaskFiles(item, files, withFile: withFile);
+    store.removeDownloadRecord(AppStore.downloadRecordKey(item));
+    if (!mounted) return;
+    pmToast(
+      context,
+      withFile
+          ? (freed > 0 ? '已删除任务与文件，释放 ${formatBytes(freed)}' : '已删除任务')
+          : '已删除任务，文件保留在下载目录',
+    );
+    Navigator.of(context).maybePop();
+  }
+
+
   @override
   Widget build(BuildContext context) {
     final pm = context.pm;
@@ -112,6 +147,10 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
     final dnsServers = (d?['dns_servers'] as List? ?? const []).map((e) => e.toString()).toList();
     final mirrors = (d?['mirrors'] as List? ?? const []).map((e) => e.toString()).toList();
     final cdnHosts = cdn.map((e) => _hostOf(e['url']?.toString() ?? '')).where((e) => e.isNotEmpty).toSet().toList();
+    final mbpsNow = (d?['mbps'] as num? ?? 0).toDouble();
+    // 剩余时间按当前瞬时速度估算；速度为 0 或大小未知时不给假数字。
+    final remainBytes = size > 0 ? (size - done).clamp(0.0, size) : 0.0;
+    final etaSeconds = (remainBytes > 0 && mbpsNow > 0.05) ? remainBytes * 8 / 1e6 / mbpsNow : 0.0;
 
     return Scaffold(
       body: SafeArea(
@@ -123,6 +162,9 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
               title: d?['name']?.toString().isNotEmpty == true ? d!['name'].toString() : (widget.name.isEmpty ? '下载详情' : widget.name),
               subtitle: '任务 ${widget.id}',
               showBack: true,
+              actions: [
+                PmIconAction(icon: Icons.delete_outline_rounded, onTap: _deleteTask),
+              ],
             ),
             if (isRecovered) ...[
               PmCard(
@@ -181,9 +223,35 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
                     const SizedBox(height: 12),
                     Row(
                       children: [
-                        Expanded(child: PmStat(label: '速率', value: formatMbps((d['mbps'] as num? ?? 0).toDouble()), unit: 'Mbps', icon: Icons.bolt_rounded)),
-                        Expanded(child: PmStat(label: isStream ? '分片' : '分块', value: isStream ? '$partsDone/$partsTotal' : '${chunks.length}', icon: Icons.grid_view_rounded)),
-                        Expanded(child: PmStat(label: '线程', value: '${d['connections'] ?? workers.length}', icon: Icons.hub_rounded)),
+                        Expanded(
+                          child: PmStat(
+                            label: '速率',
+                            value: formatMbps(mbpsNow),
+                            unit: unitOf(mbpsNow),
+                            icon: Icons.bolt_rounded,
+                          ),
+                        ),
+                        Expanded(
+                          child: PmStat(
+                            label: '剩余',
+                            value: etaSeconds > 0 ? formatEta(etaSeconds) : '--',
+                            icon: Icons.schedule_rounded,
+                          ),
+                        ),
+                        Expanded(
+                          child: PmStat(
+                            label: isStream ? '分片' : '分块',
+                            value: isStream ? '$partsDone/$partsTotal' : '${chunks.length}',
+                            icon: Icons.grid_view_rounded,
+                          ),
+                        ),
+                        Expanded(
+                          child: PmStat(
+                            label: '线程',
+                            value: '${d['connections'] ?? workers.length}',
+                            icon: Icons.hub_rounded,
+                          ),
+                        ),
                       ],
                     ),
                     if ((d['chunk_size'] as num? ?? 0) > 0) ...[
@@ -207,7 +275,12 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
                     if (mirrors.isNotEmpty)
                       _kvRow(context, 'CDN 镜像', mirrors.map(_hostOf).join('\n'), mono: true),
                     _kvRow(context, '解析 DNS', dnsServers.isEmpty ? '—' : dnsServers.join(' · '), mono: true),
-                    _kvRow(context, 'CDN 节点', cdnHosts.isEmpty ? '解析中…' : cdnHosts.join(' · ')),
+                    _kvRow(
+                      context,
+                      'CDN 域名',
+                      cdnHosts.isEmpty ? '解析中…' : '${cdnHosts.length} 个（明细见下方 IP 池）',
+                      mono: true,
+                    ),
                     _kvRow(context, '实际分配', '${workers.length} 个 Work · ${cdn.length} 个 CDN IP'),
                   ],
                 ),
@@ -245,53 +318,11 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
                       ),
               ),
               const SizedBox(height: 14),
-              PmSectionTitle('工作线程（${workers.length}）'),
-              for (final w in workers)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 8),
-                  child: PmCard(
-                    padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            PmIconBadge(Icons.memory_rounded, size: 30, radius: 9),
-                            const SizedBox(width: 10),
-                            Expanded(
-                              child: Text('Work ${w['id']}', style: context.text.titleSmall),
-                            ),
-                            PmPill(label: w['state']?.toString() ?? '—', dense: true),
-                          ],
-                        ),
-                        const SizedBox(height: 8),
-                        Row(
-                          children: [
-                            Expanded(
-                              child: (w['ip']?.toString().isNotEmpty ?? false)
-                                  ? IpGeoInline(ip: w['ip'].toString(), showIp: true, fontSize: 11.5)
-                                  : Text('等待分配 CDN IP', style: context.text.bodySmall?.copyWith(color: pm.muted)),
-                            ),
-                            Text('${formatMbps((w['mbps'] as num? ?? 0).toDouble())} Mbps · ${w['chunks'] ?? 0} 块 · ${formatBytes((w['bytes'] as num? ?? 0).toDouble())}',
-                                style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11)),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            _tag(context, 'DNS ${w['dns'] ?? '—'}'),
-                            const SizedBox(width: 6),
-                            Expanded(child: _tag(context, 'CDN ${_hostOf(w['cdn']?.toString() ?? '')}', flex: true)),
-                          ],
-                        ),
-                        if ((w['last_error']?.toString() ?? '').isNotEmpty) ...[
-                          const SizedBox(height: 4),
-                          Text(w['last_error'].toString(), style: context.text.bodySmall?.copyWith(color: pm.warn, fontSize: 10.5)),
-                        ],
-                      ],
-                    ),
-                  ),
-                ),
+              PmSectionTitle(
+                '工作线程（${workers.length}）',
+                subtitle: workers.isEmpty ? null : '逐条连接的实时速度与出口归属',
+              ),
+              for (final w in workers) _workerCard(context, w, done: done),
               if (isRecovered && widget.onResume != null) ...[
                 const SizedBox(height: 12),
                 PmPrimaryButton(
@@ -310,51 +341,320 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
                 ),
               ],
               const SizedBox(height: 6),
-              PmSectionTitle('CDN IP 池（${cdn.length}）'),
-              PmCard(
-                padding: const EdgeInsets.fromLTRB(14, 6, 14, 6),
-                child: cdn.isEmpty
-                    ? Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        child: Text(
-                          isRecovered ? '本地记录未保存 CDN 节点，继续后会重新解析。' : '正在通过多个 DNS 解析 CDN 节点…',
-                          style: context.text.bodySmall?.copyWith(color: pm.muted),
-                        ),
-                      )
-                    : Column(
-                        children: [
-                          for (final e in cdn)
-                            Padding(
-                              padding: const EdgeInsets.symmetric(vertical: 7),
-                              child: Row(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  SizedBox(
-                                    width: 92,
-                                    child: (e['ip']?.toString().isNotEmpty ?? false)
-                                        ? IpGeoInline(ip: e['ip'].toString(), showIp: true, fontSize: 11)
-                                        : Text('解析失败', style: context.text.bodySmall?.copyWith(color: pm.warn)),
-                                  ),
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Text('CDN ${_hostOf(e['url']?.toString() ?? '')}', style: context.text.bodySmall, maxLines: 2, overflow: TextOverflow.ellipsis),
-                                        Text('DNS ${e['dns']} · ${e['ms']} ms', style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 10)),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                        ],
-                      ),
+              PmSectionTitle(
+                'CDN IP 池（${cdn.length}）',
+                subtitle: cdn.isEmpty ? null : '按响应延迟排序 · 点按 IP 查看完整归属',
               ),
+              _cdnPool(context, cdn, isRecovered: isRecovered),
             ],
           ],
         ),
       ),
     );
+  }
+
+  /// 单个工作线程卡片。
+  ///
+  /// 原先速度、块数、IP 归属全挤在同一行，窄屏上归属地会被省略号吃掉；
+  /// 这里改成「指标三列 + 出口归属 + CDN/DNS 明细」的纵向结构，信息不再互相挤压。
+  Widget _workerCard(BuildContext context, Map w, {required double done}) {
+    final pm = context.pm;
+    final scheme = context.scheme;
+    final mbps = (w['mbps'] as num? ?? 0).toDouble();
+    final bytes = (w['bytes'] as num? ?? 0).toDouble();
+    final chunks = (w['chunks'] as num? ?? 0).toInt();
+    final errs = (w['errs'] as num? ?? 0).toInt();
+    final elapsed = (w['elapsed_ms'] as num? ?? 0).toInt();
+    // 平均速度只在跑够 1.2 秒后才有意义，避免刚起步时算出夸张数值。
+    final avg = elapsed >= 1200 ? bytes * 8 / 1e6 / (elapsed / 1000) : 0.0;
+    final share = done > 0 ? (bytes / done * 100).clamp(0.0, 100.0) : 0.0;
+    final ip = w['ip']?.toString() ?? '';
+    final dns = w['dns']?.toString() ?? '';
+    final cdnHost = _hostOf(w['cdn']?.toString() ?? '');
+    final state = w['state']?.toString() ?? '—';
+    final color = switch (state) {
+      '失败' => pm.warn,
+      '下载中' => scheme.primary,
+      '待命' => pm.ok,
+      _ => pm.muted,
+    };
+    final err = w['last_error']?.toString() ?? '';
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 10),
+      child: PmCard(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 13),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                PmIconBadge(Icons.memory_rounded, size: 30, radius: 9, color: color),
+                const SizedBox(width: 10),
+                Expanded(child: Text('Work ${w['id']}', style: context.text.titleSmall)),
+                PmPill(label: state, dense: true, color: color),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(
+                  flex: 4,
+                  child: _metric(
+                    context,
+                    value: formatMbps(mbps),
+                    unit: unitOf(mbps),
+                    label: avg > 0 ? '均速 ${formatMbps(avg)}' : '当前速度',
+                    color: state == '下载中' ? scheme.primary : null,
+                  ),
+                ),
+                Expanded(
+                  flex: 4,
+                  child: _metric(
+                    context,
+                    value: formatBytes(bytes),
+                    label: '已下载 ${share.toStringAsFixed(share >= 10 ? 0 : 1)}%',
+                  ),
+                ),
+                Expanded(
+                  flex: 3,
+                  child: _metric(
+                    context,
+                    value: '$chunks',
+                    unit: '块',
+                    label: errs > 0 ? '失败 $errs 次' : '零失败',
+                    color: errs > 0 ? pm.warn : null,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 11),
+            Divider(height: 1, thickness: 1, color: pm.track),
+            const SizedBox(height: 10),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 2),
+                  child: Icon(Icons.public_rounded, size: 13, color: pm.muted),
+                ),
+                const SizedBox(width: 6),
+                Expanded(child: IpGeoBlock(ip: ip, fontSize: 12.5, showIp: true, showIsp: true)),
+              ],
+            ),
+            if (cdnHost.isNotEmpty) ...[
+              const SizedBox(height: 7),
+              _lineItem(context, Icons.cloud_queue_rounded, 'CDN', cdnHost),
+            ],
+            if (dns.isNotEmpty) ...[
+              const SizedBox(height: 5),
+              _lineItem(context, Icons.router_rounded, 'DNS', dns),
+            ],
+            if (err.isNotEmpty) ...[
+              const SizedBox(height: 9),
+              _errorNote(context, err),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 指标单元格：上行数值（可带单位），下行说明文字。
+  Widget _metric(
+    BuildContext context, {
+    required String value,
+    String unit = '',
+    required String label,
+    Color? color,
+  }) {
+    final pm = context.pm;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text.rich(
+          TextSpan(
+            children: [
+              TextSpan(
+                text: value,
+                style: TextStyle(
+                  fontSize: 15.5,
+                  fontWeight: FontWeight.w700,
+                  height: 1.1,
+                  color: color ?? context.scheme.onSurface,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+              if (unit.isNotEmpty)
+                TextSpan(
+                  text: ' $unit',
+                  style: TextStyle(fontSize: 9.5, fontWeight: FontWeight.w500, color: pm.muted),
+                ),
+            ],
+          ),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        const SizedBox(height: 3),
+        Text(
+          label,
+          style: context.text.bodySmall?.copyWith(fontSize: 10, color: pm.muted),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ],
+    );
+  }
+
+  /// 带图标的一行明细（CDN 域名 / DNS 服务器等）。
+  Widget _lineItem(BuildContext context, IconData icon, String label, String value) {
+    final pm = context.pm;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Padding(
+          padding: const EdgeInsets.only(top: 1),
+          child: Icon(icon, size: 13, color: pm.muted),
+        ),
+        const SizedBox(width: 6),
+        SizedBox(
+          width: 30,
+          child: Text(
+            label,
+            style: context.text.bodySmall?.copyWith(fontSize: 10, color: pm.muted),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: context.text.bodySmall?.copyWith(
+              fontSize: 11.5,
+              height: 1.3,
+              color: context.scheme.onSurface.withValues(alpha: 0.85),
+            ),
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _errorNote(BuildContext context, String message) {
+    final pm = context.pm;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+      decoration: ShapeDecoration(
+        color: pm.warn.withValues(alpha: context.isDark ? 0.14 : 0.09),
+        shape: RoundedSuperellipseBorder(borderRadius: BorderRadius.circular(9)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.error_outline_rounded, size: 13, color: pm.warn),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              message,
+              style: context.text.bodySmall?.copyWith(
+                fontSize: 10.5,
+                height: 1.35,
+                color: pm.warn,
+              ),
+              maxLines: 3,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// CDN IP 池：每条节点独立成块，IP / 归属地（到市）/ 运营商、域名、DNS、延迟分行显示。
+  Widget _cdnPool(BuildContext context, List<Map> cdn, {required bool isRecovered}) {
+    final pm = context.pm;
+    if (cdn.isEmpty) {
+      return PmCard(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        child: Text(
+          isRecovered ? '本地记录未保存 CDN 节点，继续后会重新解析。' : '正在通过多个 DNS 解析 CDN 节点…',
+          style: context.text.bodySmall?.copyWith(color: pm.muted),
+        ),
+      );
+    }
+    // 延迟小的排前面，一眼就能看到当前最快的节点。
+    final sorted = [...cdn]..sort((a, b) {
+        final x = ((a['ms'] as num?) ?? 0x3FFFFFFF).toDouble();
+        final y = ((b['ms'] as num?) ?? 0x3FFFFFFF).toDouble();
+        return x.compareTo(y);
+      });
+    return PmCard(
+      padding: const EdgeInsets.fromLTRB(14, 2, 14, 2),
+      child: Column(
+        children: [
+          for (var i = 0; i < sorted.length; i++) ...[
+            if (i > 0) Divider(height: 1, thickness: 1, color: pm.track),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 10),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if ((sorted[i]['ip']?.toString() ?? '').isEmpty)
+                          Text(
+                            '解析失败',
+                            style: context.text.bodySmall?.copyWith(fontSize: 12, color: pm.warn),
+                          )
+                        else
+                          IpGeoBlock(
+                            ip: sorted[i]['ip'].toString(),
+                            fontSize: 12.5,
+                            showIp: true,
+                            showIsp: true,
+                          ),
+                        const SizedBox(height: 7),
+                        _lineItem(
+                          context,
+                          Icons.cloud_queue_rounded,
+                          'CDN',
+                          _hostOf(sorted[i]['url']?.toString() ?? ''),
+                        ),
+                        const SizedBox(height: 5),
+                        _lineItem(
+                          context,
+                          Icons.router_rounded,
+                          'DNS',
+                          sorted[i]['dns']?.toString() ?? '—',
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _latencyPill(context, (sorted[i]['ms'] as num? ?? 0).toInt()),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 延迟徽标：80ms 内为良好，220ms 内正常，再高标警。
+  Widget _latencyPill(BuildContext context, int ms) {
+    final pm = context.pm;
+    final color = ms <= 0
+        ? pm.muted
+        : ms < 80
+            ? pm.ok
+            : ms < 220
+                ? context.scheme.primary
+                : pm.warn;
+    return PmPill(label: ms > 0 ? '$ms ms' : '超时', dense: true, color: color);
   }
 
   Widget _kvRow(BuildContext context, String k, String v, {bool mono = false}) {
@@ -389,18 +689,6 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
   static String _hostOf(String url) {
     final u = Uri.tryParse(url);
     return u == null ? url : '${u.host}${u.path}';
-  }
-
-  Widget _tag(BuildContext context, String text, {bool flex = false}) {
-    final child = Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-      decoration: ShapeDecoration(
-        color: context.pm.block,
-        shape: RoundedSuperellipseBorder(borderRadius: BorderRadius.circular(7)),
-      ),
-      child: Text(text, style: context.text.bodySmall?.copyWith(fontSize: 10, color: context.pm.muted), maxLines: 1, overflow: TextOverflow.ellipsis),
-    );
-    return flex ? child : child;
   }
 
   Color _chunkColor(BuildContext context, Map c, Color active, Color ok) {

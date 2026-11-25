@@ -48,7 +48,7 @@ class HistoryRecord {
 }
 
 const String kDefaultDownloadDir = '/storage/emulated/0/Download/NetPulse';
-const String kAppVersion = '1.2.0';
+const String kAppVersion = '1.3.0';
 
 String _dnsKey(String value) {
   var key = value.trim().toLowerCase();

@@ -376,6 +376,102 @@ class IpGeoInline extends StatelessWidget {
   }
 }
 
+/// 多行 IP 归属展示：IP 单独一行，「国家 · 省 · 市」独占一行。
+///
+/// [IpGeoInline] 把 IP 与归属拼在一行，在窄卡片里会被省略号截断；需要看清
+/// 市级归属时用这个，纵向排版不会互相挤占。
+class IpGeoBlock extends StatelessWidget {
+  const IpGeoBlock({
+    super.key,
+    required this.ip,
+    this.fontSize = 12.5,
+    this.showIp = true,
+    this.showIsp = false,
+    this.align = CrossAxisAlignment.start,
+    this.ipColor,
+  });
+
+  final String ip;
+  final double fontSize;
+  final bool showIp;
+  final bool showIsp;
+  final CrossAxisAlignment align;
+  final Color? ipColor;
+
+  @override
+  Widget build(BuildContext context) {
+    if (ip.isEmpty || ip == '*') {
+      return Text(
+        '等待分配 CDN IP',
+        style: context.text.bodySmall?.copyWith(fontSize: fontSize, color: context.pm.muted),
+      );
+    }
+    IpGeoService.lookup(ip);
+    final pm = context.pm;
+    return ListenableBuilder(
+      listenable: IpGeoService.changes,
+      builder: (context, _) {
+        final info = IpGeoService.cached(ip);
+        final geo = info == null
+            ? '归属地查询中…'
+            : info.found
+                ? '${flagOf(info.countryCode)} ${info.label}'
+                : '🌐 未知归属地';
+        // 在线源没给到城市时明确标出来，避免把省级当成市级。
+        final pendingCity = info != null && info.found && info.city.trim().isEmpty;
+        return InkWell(
+          onTap: () => showIpDetailSheet(context, ip),
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 1),
+            child: Column(
+              crossAxisAlignment: align,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (showIp)
+                  Text(
+                    ip,
+                    style: context.text.bodySmall?.copyWith(
+                      fontSize: fontSize,
+                      fontWeight: FontWeight.w600,
+                      color: ipColor ?? context.scheme.onSurface,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                if (showIp) const SizedBox(height: 2),
+                Text(
+                  pendingCity ? '$geo · 市级待补全' : geo,
+                  style: context.text.bodySmall?.copyWith(
+                    fontSize: (fontSize - 0.5).clamp(9.5, 14.0),
+                    height: 1.35,
+                    color: pm.muted,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                if (showIsp && (info?.isp.trim().isNotEmpty ?? false)) ...[
+                  const SizedBox(height: 1),
+                  Text(
+                    info!.isp,
+                    style: context.text.bodySmall?.copyWith(
+                      fontSize: (fontSize - 1.5).clamp(9.0, 12.5),
+                      color: pm.muted.withValues(alpha: 0.85),
+                    ),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
 Future<Map<String, dynamic>?> _apiDetail(String ip, String endpoint) async {
   try {
     final r = await Isolate.run(() {

@@ -1,8 +1,8 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:flutter/material.dart';
 import '../bridge.dart';
 import '../download_sheet.dart';
+import '../download_task_ops.dart';
 import '../page_kit.dart';
 import '../store.dart';
 import '../theme.dart';
@@ -259,6 +259,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
         builder: (_) => DownloadDetailPage(
           id: item['id']?.toString() ?? '',
           name: item['name']?.toString() ?? '',
+          dir: item['dir']?.toString() ?? '',
         ),
       ));
     } else {
@@ -266,6 +267,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
         builder: (_) => DownloadDetailPage(
           id: item['id']?.toString() ?? 'local',
           name: item['name']?.toString() ?? '',
+          dir: item['dir']?.toString() ?? '',
           snapshot: item,
           onResume: () async => await _resume(item),
         ),
@@ -273,33 +275,36 @@ class _DownloadsPageState extends State<DownloadsPage> {
     }
   }
 
-  Future<void> _delete(Map<String, dynamic> item) async {
+  /// 删除入口：先探测磁盘产物，再让用户决定是否连文件一起删。
+  Future<void> _confirmDelete(Map<String, dynamic> item) async {
     final store = AppScope.of(context);
-    final dir = item['dir']?.toString() ?? store.downloadDirEffective;
-    final name = item['name']?.toString() ?? '';
-    if (item['live'] == true && !(item['id']?.toString().startsWith('local:') ?? true)) {
-      try {
-        Core.i.call('dl_delete', {'id': item['id'], 'delete_files': true});
-        Core.i.dispose(item['id']?.toString() ?? '');
-      } catch (_) {}
-    } else {
-      final dataFile = item['data_file']?.toString() ?? '';
-      final metaFile = item['meta_file']?.toString() ?? '';
-      final candidates = <String>[
-        if (dataFile.isNotEmpty) dataFile,
-        if (metaFile.isNotEmpty) metaFile,
-        if (dir.isNotEmpty && name.isNotEmpty) '$dir/.$name.pmdown',
-        if (dir.isNotEmpty && name.isNotEmpty) '$dir/.$name.pmdown.json',
-      ];
-      for (final path in candidates) {
-        try {
-          await File(path).delete();
-        } catch (_) {}
-      }
-    }
+    final files = await probeTaskFiles(item, store.downloadDirEffective);
+    if (!mounted) return;
+    final withFile = await askDeleteTask(context, files);
+    if (withFile == null || !mounted) return;
+    await _delete(item, withFile: withFile, files: files);
+  }
+
+  Future<void> _delete(
+    Map<String, dynamic> item, {
+    required bool withFile,
+    TaskFiles? files,
+  }) async {
+    final store = AppScope.of(context);
+    final probe = files ?? await probeTaskFiles(item, store.downloadDirEffective);
+    final freed = await removeTaskFiles(item, probe, withFile: withFile);
     store.removeDownloadRecord(AppStore.downloadRecordKey(item));
     _scanDone = false;
     await _refresh();
+    if (!mounted) return;
+    if (withFile) {
+      pmToast(
+        context,
+        freed > 0 ? '已删除任务与文件，释放 ${formatBytes(freed)}' : '已删除任务',
+      );
+    } else {
+      pmToast(context, '已删除任务，文件保留在下载目录');
+    }
   }
 
   void _add() => showDownloadSheet(context);
@@ -508,7 +513,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
                         onChanged: _refresh,
                         onOpen: () => _openDetail(item),
                         onResume: () => _resume(item),
-                        onDelete: () => _delete(item),
+                        onDelete: () => _confirmDelete(item),
                         accent: scheme.primary,
                       ),
                     ),
@@ -683,14 +688,7 @@ class _DownloadTile extends StatelessWidget {
                 label: '删除',
                 icon: Icons.delete_outline_rounded,
                 danger: true,
-                onTap: () => confirmDialog(
-                  context,
-                  title: '删除任务',
-                  message: '同时删除未完成的临时文件？已下载完成的目标文件不会删除。',
-                  confirmLabel: '删除',
-                  destructive: true,
-                  onConfirm: () { onDelete(); },
-                ),
+                onTap: () { onDelete(); },
               ),
             ],
           ),
