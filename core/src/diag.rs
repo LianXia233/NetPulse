@@ -149,7 +149,11 @@ pub fn start_ping(args: Value) -> Result<Value, String> {
                 thread::sleep(Duration::from_millis(p.interval_ms.clamp(50, 5000)));
             }
         }
-        let avg = if rtts.is_empty() { 0.0 } else { rtts.iter().sum::<f64>() / rtts.len() as f64 };
+        let avg = if rtts.is_empty() {
+            0.0
+        } else {
+            rtts.iter().sum::<f64>() / rtts.len() as f64
+        };
         let min = rtts.iter().cloned().fold(f64::INFINITY, f64::min);
         let max = rtts.iter().cloned().fold(0.0f64, f64::max);
         let jitter = if rtts.len() > 1 {
@@ -157,7 +161,11 @@ pub fn start_ping(args: Value) -> Result<Value, String> {
         } else {
             0.0
         };
-        let loss = if seq == 0 { 0.0 } else { (seq - ok) as f64 / seq as f64 * 100.0 };
+        let loss = if seq == 0 {
+            0.0
+        } else {
+            (seq - ok) as f64 / seq as f64 * 100.0
+        };
         let summary = json!({
             "target": target, "ip": ip.to_string(), "port": p.port,
             "sent": seq, "received": ok,
@@ -232,7 +240,11 @@ fn stun_query(sock: &UdpSocket, dest: SocketAddr, timeout: Duration) -> Result<S
             if (atype == 0x0020 || atype == 0x0001) && body.len() >= 8 {
                 let family = body[1];
                 let xport = u16::from_be_bytes([body[2], body[3]]);
-                let port = if atype == 0x0020 { xport ^ 0x2112 } else { xport };
+                let port = if atype == 0x0020 {
+                    xport ^ 0x2112
+                } else {
+                    xport
+                };
                 let ip = if family == 0x01 && body.len() >= 8 {
                     let mut oct = [0u8; 4];
                     for i in 0..4 {
@@ -348,9 +360,9 @@ pub fn start_nat(args: Value) -> Result<Value, String> {
             }
         }
         let same_across = mappings.len() >= 2
-            && mappings.iter().all(|(_, m)| {
-                m.ip() == mappings[0].1.ip() && m.port() == mappings[0].1.port()
-            });
+            && mappings
+                .iter()
+                .all(|(_, m)| m.ip() == mappings[0].1.ip() && m.port() == mappings[0].1.port());
         let mapping_behavior = if mappings.is_empty() {
             "未知"
         } else if same_across {
@@ -413,7 +425,12 @@ pub fn start_trace(args: Value) -> Result<Value, String> {
     let (id, task) = new_task("trace");
     spawn_task(task, move |task| {
         let result = match target {
-            IpAddr::V4(v4) => trace_v4(v4, p.max_hops.clamp(1, 64), p.timeout_ms.clamp(300, 10000), &task),
+            IpAddr::V4(v4) => trace_v4(
+                v4,
+                p.max_hops.clamp(1, 64),
+                p.timeout_ms.clamp(300, 10000),
+                &task,
+            ),
             IpAddr::V6(_) => Err("IPv6 路由追踪暂未开放".to_string()),
         };
         if task.is_cancelled() {
@@ -549,9 +566,7 @@ fn trace_v4(
                                     let oct = (*sa).sin_addr.s_addr.to_ne_bytes();
                                     let ip = Ipv4Addr::from(oct);
                                     hop_ip = Some(ip);
-                                    if ip == target
-                                        || (*ee).ee_errno == libc::ECONNREFUSED as u32
-                                    {
+                                    if ip == target || (*ee).ee_errno == libc::ECONNREFUSED as u32 {
                                         reached = true;
                                     }
                                 }
@@ -644,13 +659,41 @@ pub fn start_iperf(args: Value) -> Result<Value, String> {
                         }
                     }));
                 }
-                let code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+                // iperf3 客户端会按 -t 自动退出，服务端则长期运行；
+                // 轮询 try_wait 让 task_cancel 能真正 kill 子进程。
+                let mut cancelled = false;
+                let mut code = -1;
+                loop {
+                    match child.try_wait() {
+                        Ok(Some(status)) => {
+                            code = status.code().unwrap_or(-1);
+                            break;
+                        }
+                        Ok(None) => {
+                            if t.is_cancelled() {
+                                cancelled = true;
+                                let _ = child.kill();
+                                code = child.wait().map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(100));
+                        }
+                        Err(e) => {
+                            t.emit(json!({"type": "error", "message": format!("iperf3 状态读取失败: {}", e)}));
+                            break;
+                        }
+                    }
+                }
                 for th in threads {
                     let _ = th.join();
                 }
-                let summary = json!({"exit_code": code, "args": p.args});
-                t.emit(json!({"type": "exit", "code": code}));
-                t.finish("done", summary);
+                let summary = json!({
+                    "exit_code": code,
+                    "args": p.args,
+                    "cancelled": cancelled,
+                });
+                t.emit(json!({"type": "exit", "code": code, "cancelled": cancelled}));
+                t.finish(if cancelled { "cancelled" } else { "done" }, summary);
             }
             Err(e) => {
                 let msg = format!("无法启动 iperf3: {}", e);
@@ -660,4 +703,41 @@ pub fn start_iperf(args: Value) -> Result<Value, String> {
         }
     });
     Ok(json!({"task_id": id}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::get_task;
+
+    #[test]
+    fn iperf_cancel_kills_child_process() {
+        let started = start_iperf(json!({"bin": "/bin/sleep", "args": ["30"]})).unwrap();
+        let id = started["task_id"].as_str().unwrap().to_string();
+        // 等待子进程真正起来，避免 cancel 落在 spawn 之前。
+        thread::sleep(Duration::from_millis(250));
+        let task = get_task(&id).unwrap();
+        assert_eq!(*task.status.lock().unwrap(), "running");
+        task.cancel
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let mut status = String::new();
+        for _ in 0..50 {
+            status = task.status.lock().unwrap().clone();
+            if status != "running" && status != "cancelling" {
+                break;
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(status, "cancelled");
+        let summary = task.summary.lock().unwrap().clone().unwrap_or(Value::Null);
+        assert_eq!(summary["cancelled"], true);
+        let events = task.events.lock().unwrap().clone();
+        assert!(
+            events
+                .iter()
+                .any(|e| e["type"] == "exit" && e["cancelled"] == true),
+            "缺少取消退出事件: {:?}",
+            events
+        );
+    }
 }

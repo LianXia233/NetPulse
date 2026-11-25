@@ -1,5 +1,7 @@
 import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
+
 import '../bridge.dart';
 import '../ip_geo_widgets.dart';
 import '../page_kit.dart';
@@ -40,7 +42,8 @@ class _ToolsPageState extends State<ToolsPage> {
               children: [
                 PmSegmented<int>(
                   items: [
-                    for (var i = 0; i < _tabs.length; i++) (value: i, label: _tabs[i]),
+                    for (var i = 0; i < _tabs.length; i++)
+                      (value: i, label: _tabs[i]),
                   ],
                   value: _index,
                   onChanged: (v) => setState(() => _index = v),
@@ -52,7 +55,10 @@ class _ToolsPageState extends State<ToolsPage> {
                   transitionBuilder: (child, animation) => FadeTransition(
                     opacity: animation,
                     child: SlideTransition(
-                      position: Tween(begin: const Offset(0, 0.02), end: Offset.zero).animate(animation),
+                      position: Tween(
+                        begin: const Offset(0, 0.02),
+                        end: Offset.zero,
+                      ).animate(animation),
                       child: child,
                     ),
                   ),
@@ -70,13 +76,20 @@ class _ToolsPageState extends State<ToolsPage> {
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(Icons.info_outline_rounded, size: 16, color: pm.muted),
+                      Icon(
+                        Icons.info_outline_rounded,
+                        size: 16,
+                        color: pm.muted,
+                      ),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
                           '诊断全部在本机 Rust core 执行：DNS 查询走自定义 UDP/TCP 解析器，Ping 为 TCP 握手 RTT，'
                           'NAT 使用 STUN Binding，路由追踪依赖内核 IP_RECVERR（部分 ROM 需 root）。',
-                          style: context.text.bodySmall?.copyWith(color: pm.muted, height: 1.4),
+                          style: context.text.bodySmall?.copyWith(
+                            color: pm.muted,
+                            height: 1.4,
+                          ),
                         ),
                       ),
                     ],
@@ -114,7 +127,12 @@ class ToolDetailPage extends StatelessWidget {
         bottom: false,
         child: ListView(
           physics: const AlwaysScrollableScrollPhysics(),
-          padding: const EdgeInsets.fromLTRB(kPagePadding, 8, kPagePadding, 100),
+          padding: const EdgeInsets.fromLTRB(
+            kPagePadding,
+            8,
+            kPagePadding,
+            100,
+          ),
           children: [
             PmPageHeader(title: name, showBack: true),
             const SizedBox(height: 6),
@@ -159,6 +177,7 @@ class _PingPanelState extends State<PingPanel> {
       _count.text = '${AppScope.of(context).pingCount}';
     }
   }
+
   CoreTask? _task;
   final List<double> _rtts = [];
   final List<Map<String, dynamic>> _rows = [];
@@ -234,26 +253,33 @@ class _PingPanelState extends State<PingPanel> {
               PmField(controller: _target, label: '目标地址', hint: 'IP 或域名'),
               const SizedBox(height: 12),
               Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Expanded(
-                    child: PmField(controller: _port, label: 'TCP 端口', keyboardType: TextInputType.number),
+                    child: PmField(
+                      controller: _port,
+                      label: 'TCP 端口',
+                      hint: '443',
+                      keyboardType: TextInputType.number,
+                    ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
-                    child: PmField(controller: _count, label: '次数（默认 20）', keyboardType: TextInputType.number),
-                  ),
-                  const SizedBox(width: 12),
-                  Padding(
-                    padding: const EdgeInsets.only(top: 18),
-                    child: PmPrimaryButton(
-                      label: running ? '停止' : '开始',
-                      expand: false,
-                      icon: running ? Icons.stop_rounded : Icons.play_arrow_rounded,
-                      destructive: running,
-                      onPressed: running ? () => t?.stop() : _start,
+                    child: PmField(
+                      controller: _count,
+                      label: '次数',
+                      hint: '20',
+                      keyboardType: TextInputType.number,
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 12),
+              PmPrimaryButton(
+                label: running ? '停止' : '开始',
+                icon: running ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                destructive: running,
+                onPressed: running ? () => t?.stop() : _start,
               ),
             ],
           ),
@@ -264,9 +290,27 @@ class _PingPanelState extends State<PingPanel> {
             padding: const EdgeInsets.all(16),
             child: Row(
               children: [
-                Expanded(child: PmStat(label: '平均', value: formatLatency((_summary!['avg'] as num? ?? 0)), unit: 'ms')),
-                Expanded(child: PmStat(label: '抖动', value: formatLatency((_summary!['jitter'] as num? ?? 0)), unit: 'ms')),
-                Expanded(child: PmStat(label: '丢包', value: '${_summary!['loss'] ?? 0}', unit: '%')),
+                Expanded(
+                  child: PmStat(
+                    label: '平均',
+                    value: formatLatency((_summary!['avg'] as num? ?? 0)),
+                    unit: 'ms',
+                  ),
+                ),
+                Expanded(
+                  child: PmStat(
+                    label: '抖动',
+                    value: formatLatency((_summary!['jitter'] as num? ?? 0)),
+                    unit: 'ms',
+                  ),
+                ),
+                Expanded(
+                  child: PmStat(
+                    label: '丢包',
+                    value: '${_summary!['loss'] ?? 0}',
+                    unit: '%',
+                  ),
+                ),
               ],
             ),
           ),
@@ -281,11 +325,18 @@ class _PingPanelState extends State<PingPanel> {
                   children: [
                     Text('RTT 曲线', style: context.text.titleSmall),
                     const Spacer(),
-                    Text('${_rtts.length} 次成功', style: context.text.bodySmall?.copyWith(color: pm.muted)),
+                    Text(
+                      '${_rtts.length} 次成功',
+                      style: context.text.bodySmall?.copyWith(color: pm.muted),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 8),
-                PmChart(values: _rtts, height: 110, maxValue: math.max(50, _rtts.reduce(math.max) * 1.2)),
+                PmChart(
+                  values: _rtts,
+                  height: 110,
+                  maxValue: math.max(50, _rtts.reduce(math.max) * 1.2),
+                ),
               ],
             ),
           ),
@@ -301,7 +352,10 @@ class _PingPanelState extends State<PingPanel> {
                   children: [
                     Text('最近记录', style: context.text.titleSmall),
                     const Spacer(),
-                    Text('${_rows.length} 条 · 可上下滑动', style: context.text.bodySmall?.copyWith(color: pm.muted)),
+                    Text(
+                      '${_rows.length} 条 · 可上下滑动',
+                      style: context.text.bodySmall?.copyWith(color: pm.muted),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 6),
@@ -319,7 +373,11 @@ class _PingPanelState extends State<PingPanel> {
                         child: Row(
                           children: [
                             if (r['type'] == 'resolve') ...[
-                              PmIconBadge(Icons.lan_rounded, size: 30, radius: 10),
+                              PmIconBadge(
+                                Icons.lan_rounded,
+                                size: 30,
+                                radius: 10,
+                              ),
                               const SizedBox(width: 10),
                               Expanded(
                                 child: Column(
@@ -330,7 +388,11 @@ class _PingPanelState extends State<PingPanel> {
                                       style: context.text.bodySmall,
                                       overflow: TextOverflow.ellipsis,
                                     ),
-                                    if ((r['ip'] ?? '').toString() != '*') IpGeoInline(ip: '${r['ip']}', fontSize: 10),
+                                    if ((r['ip'] ?? '').toString() != '*')
+                                      IpGeoInline(
+                                        ip: '${r['ip']}',
+                                        fontSize: 10,
+                                      ),
                                   ],
                                 ),
                               ),
@@ -339,15 +401,22 @@ class _PingPanelState extends State<PingPanel> {
                                 width: 34,
                                 child: Text(
                                   '#${r['seq']}',
-                                  style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
+                                  style: context.text.bodySmall?.copyWith(
+                                    color: pm.muted,
+                                    fontSize: 11,
+                                  ),
                                 ),
                               ),
                               Expanded(
                                 child: Text(
-                                  r['ok'] == true ? '${formatLatency((r['ms'] as num? ?? 0))} ms' : '超时',
+                                  r['ok'] == true
+                                      ? '${formatLatency((r['ms'] as num? ?? 0))} ms'
+                                      : '超时',
                                   style: context.text.bodySmall?.copyWith(
                                     color: r['ok'] == true ? null : pm.warn,
-                                    fontFeatures: const [FontFeature.tabularFigures()],
+                                    fontFeatures: const [
+                                      FontFeature.tabularFigures(),
+                                    ],
                                   ),
                                 ),
                               ),
@@ -356,10 +425,17 @@ class _PingPanelState extends State<PingPanel> {
                                 child: ClipRRect(
                                   borderRadius: BorderRadius.circular(3),
                                   child: LinearProgressIndicator(
-                                    value: r['ok'] == true ? ((r['ms'] as num? ?? 0) / 200).clamp(0.05, 1.0) : 0,
+                                    value: r['ok'] == true
+                                        ? ((r['ms'] as num? ?? 0) / 200).clamp(
+                                            0.05,
+                                            1.0,
+                                          )
+                                        : 0,
                                     minHeight: 5,
                                     backgroundColor: pm.block,
-                                    valueColor: AlwaysStoppedAnimation(r['ok'] == true ? pm.ok : pm.warn),
+                                    valueColor: AlwaysStoppedAnimation(
+                                      r['ok'] == true ? pm.ok : pm.warn,
+                                    ),
                                   ),
                                 ),
                               ),
@@ -374,7 +450,6 @@ class _PingPanelState extends State<PingPanel> {
             ),
           ),
         ],
-
       ],
     );
   }
@@ -439,7 +514,9 @@ class _DnsPanelState extends State<DnsPanel> {
     final running = _task?.running ?? false;
     final fastest = _rows.where((r) => r['ms'] is num).isEmpty
         ? null
-        : _rows.where((r) => r['ms'] is num).reduce((a, b) => (a['ms'] as num) < (b['ms'] as num) ? a : b);
+        : _rows
+              .where((r) => r['ms'] is num)
+              .reduce((a, b) => (a['ms'] as num) < (b['ms'] as num) ? a : b);
     return Column(
       children: [
         PmCard(
@@ -471,7 +548,12 @@ class _DnsPanelState extends State<DnsPanel> {
                     style: context.text.titleSmall,
                   ),
                 ),
-                PmPill(label: '${_rows.where((e) => e['type'] == 'error').length} 失败', color: pm.warn, dense: true),
+                PmPill(
+                  label:
+                      '${_rows.where((e) => e['type'] == 'error').length} 失败',
+                  color: pm.warn,
+                  dense: true,
+                ),
               ],
             ),
           ),
@@ -493,7 +575,9 @@ class _DnsPanelState extends State<DnsPanel> {
                           child: Text(
                             r['record']?.toString() ?? 'ERR',
                             style: context.text.bodySmall?.copyWith(
-                              color: r['type'] == 'error' ? pm.warn : context.scheme.primary,
+                              color: r['type'] == 'error'
+                                  ? pm.warn
+                                  : context.scheme.primary,
                               fontWeight: FontWeight.w600,
                               fontSize: 11,
                             ),
@@ -503,26 +587,46 @@ class _DnsPanelState extends State<DnsPanel> {
                           width: 108,
                           child: Text(
                             r['server']?.toString() ?? '',
-                            style: context.text.bodySmall?.copyWith(fontSize: 12),
+                            style: context.text.bodySmall?.copyWith(
+                              fontSize: 12,
+                            ),
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         Expanded(
                           child: r['type'] == 'error'
-                              ? Text(r['message']?.toString() ?? '', style: context.text.bodySmall?.copyWith(color: pm.warn, fontSize: 11))
+                              ? Text(
+                                  r['message']?.toString() ?? '',
+                                  style: context.text.bodySmall?.copyWith(
+                                    color: pm.warn,
+                                    fontSize: 11,
+                                  ),
+                                )
                               : (r['ips'] as List? ?? const []).isEmpty
-                                  ? Text('无记录', style: context.text.bodySmall?.copyWith(fontSize: 12))
-                                  : Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        for (final ip in (r['ips'] as List))
-                                          IpGeoInline(ip: ip.toString(), showIp: true, fontSize: 11.5),
-                                      ],
-                                    ),
+                              ? Text(
+                                  '无记录',
+                                  style: context.text.bodySmall?.copyWith(
+                                    fontSize: 12,
+                                  ),
+                                )
+                              : Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    for (final ip in (r['ips'] as List))
+                                      IpGeoInline(
+                                        ip: ip.toString(),
+                                        showIp: true,
+                                        fontSize: 11.5,
+                                      ),
+                                  ],
+                                ),
                         ),
                         Text(
                           r['ms'] == null ? '' : '${r['ms']}ms',
-                          style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
+                          style: context.text.bodySmall?.copyWith(
+                            color: pm.muted,
+                            fontSize: 11,
+                          ),
                         ),
                       ],
                     ),
@@ -614,7 +718,12 @@ class _NatPanelState extends State<NatPanel> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text('STUN NAT 探测', style: context.text.titleSmall),
-                        Text('Cloudflare / Google / Nextcloud / 小米 STUN · 多服务器映射判定', style: context.text.bodySmall?.copyWith(color: pm.muted)),
+                        Text(
+                          'Cloudflare / Google / Nextcloud / 小米 STUN · 多服务器映射判定',
+                          style: context.text.bodySmall?.copyWith(
+                            color: pm.muted,
+                          ),
+                        ),
                       ],
                     ),
                   ),
@@ -638,19 +747,35 @@ class _NatPanelState extends State<NatPanel> {
               children: [
                 Row(
                   children: [
-                    Expanded(child: PmStat(label: '公网地址', value: '${_summary!['public'] ?? '--'}')),
+                    Expanded(
+                      child: PmStat(
+                        label: '公网地址',
+                        value: '${_summary!['public'] ?? '--'}',
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 14),
                 Row(
                   children: [
-                    Expanded(child: PmStat(label: '映射行为', value: '${_summary!['mapping_behavior'] ?? '--'}')),
+                    Expanded(
+                      child: PmStat(
+                        label: '映射行为',
+                        value: '${_summary!['mapping_behavior'] ?? '--'}',
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 14),
                 Row(
                   children: [
-                    Expanded(child: PmStat(label: 'NAT 类型', value: '${_summary!['nat_type'] ?? '--'}', tint: pm.warn)),
+                    Expanded(
+                      child: PmStat(
+                        label: 'NAT 类型',
+                        value: '${_summary!['nat_type'] ?? '--'}',
+                        tint: pm.warn,
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 12),
@@ -658,7 +783,9 @@ class _NatPanelState extends State<NatPanel> {
                   padding: const EdgeInsets.all(12),
                   decoration: ShapeDecoration(
                     color: pm.warnSoft,
-                    shape: RoundedSuperellipseBorder(borderRadius: BorderRadius.circular(12)),
+                    shape: RoundedSuperellipseBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
                   child: Text(
                     '过滤行为：${_summary!['filtering_behavior'] ?? '未测试'}。完整类型判定需要双 STUN 服务器配合，本页给出映射行为与端口稳定性。',
@@ -683,7 +810,10 @@ class _NatPanelState extends State<NatPanel> {
                       l['type'] == 'error'
                           ? '× ${l['server'] ?? ''} ${l['message'] ?? ''}'
                           : '· ${l['type']} ${l['server'] ?? ''} ${l['public'] ?? ''}',
-                      style: context.text.bodySmall?.copyWith(color: l['type'] == 'error' ? pm.warn : pm.muted, fontSize: 11),
+                      style: context.text.bodySmall?.copyWith(
+                        color: l['type'] == 'error' ? pm.warn : pm.muted,
+                        fontSize: 11,
+                      ),
                     ),
                   ),
               ],
@@ -763,7 +893,11 @@ class _TracePanelState extends State<TracePanel> {
           padding: const EdgeInsets.all(16),
           child: Column(
             children: [
-              PmField(controller: _target, label: '目标 IP', hint: '例如 223.5.5.5'),
+              PmField(
+                controller: _target,
+                label: '目标 IP',
+                hint: '例如 223.5.5.5',
+              ),
               const SizedBox(height: 10),
               PmField(
                 controller: _maxHops,
@@ -787,7 +921,9 @@ class _TracePanelState extends State<TracePanel> {
                       loading: _task?.stopping ?? false,
                       icon: running ? Icons.stop_rounded : Icons.route_rounded,
                       destructive: running,
-                      onPressed: running ? () => _task?.stop() : _start,
+                      onPressed: running && _task?.stopping != true
+                          ? () => _task?.stop()
+                          : (running ? null : _start),
                     ),
                   ),
                 ],
@@ -808,13 +944,23 @@ class _TracePanelState extends State<TracePanel> {
                       children: [
                         SizedBox(
                           width: 28,
-                          child: Text('${h['ttl']}', style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11)),
+                          child: Text(
+                            '${h['ttl']}',
+                            style: context.text.bodySmall?.copyWith(
+                              color: pm.muted,
+                              fontSize: 11,
+                            ),
+                          ),
                         ),
                         Container(
                           width: 7,
                           height: 7,
                           decoration: BoxDecoration(
-                            color: h['ip'] == '*' ? pm.track : (h['reached'] == true ? pm.ok : context.scheme.primary),
+                            color: h['ip'] == '*'
+                                ? pm.track
+                                : (h['reached'] == true
+                                      ? pm.ok
+                                      : context.scheme.primary),
                             shape: BoxShape.circle,
                           ),
                         ),
@@ -826,17 +972,23 @@ class _TracePanelState extends State<TracePanel> {
                               Text(
                                 '${h['ip']}',
                                 style: context.text.bodySmall?.copyWith(
-                                  fontFeatures: const [FontFeature.tabularFigures()],
+                                  fontFeatures: const [
+                                    FontFeature.tabularFigures(),
+                                  ],
                                   color: h['ip'] == '*' ? pm.muted : null,
                                 ),
                               ),
-                              if (h['ip'] != '*') IpGeoInline(ip: '${h['ip']}', fontSize: 10),
+                              if (h['ip'] != '*')
+                                IpGeoInline(ip: '${h['ip']}', fontSize: 10),
                             ],
                           ),
                         ),
                         Text(
                           h['ms'] == null ? '*' : '${h['ms']} ms',
-                          style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
+                          style: context.text.bodySmall?.copyWith(
+                            color: pm.muted,
+                            fontSize: 11,
+                          ),
                         ),
                       ],
                     ),
@@ -950,9 +1102,9 @@ class _IperfPanelState extends State<IperfPanel> {
     final port = _port.text.trim().isEmpty ? '5201' : _port.text.trim();
     final args = <String>[];
     if (_role == 'server') {
-      args.addAll(['-s', '-p', port]);
+      args.addAll(['-s', '-p', port, '--forceflush']);
     } else {
-      args.addAll(['-c', _host.text.trim(), '-p', port]);
+      args.addAll(['-c', _host.text.trim(), '-p', port, '--forceflush']);
       final streams = (int.tryParse(_streams.text) ?? 4).clamp(1, 128);
       final secs = (int.tryParse(_duration.text) ?? 10).clamp(1, 3600);
       final interval = (int.tryParse(_interval.text) ?? 1).clamp(1, 60);
@@ -990,7 +1142,10 @@ class _IperfPanelState extends State<IperfPanel> {
                 Expanded(
                   child: Text(
                     _binProblem!,
-                    style: context.text.bodySmall?.copyWith(color: pm.warn, height: 1.4),
+                    style: context.text.bodySmall?.copyWith(
+                      color: pm.warn,
+                      height: 1.4,
+                    ),
                   ),
                 ),
               ],
@@ -1024,7 +1179,10 @@ class _IperfPanelState extends State<IperfPanel> {
                           Padding(
                             padding: const EdgeInsets.only(right: 6),
                             child: ActionChip(
-                              label: Text(name, style: const TextStyle(fontSize: 10.5)),
+                              label: Text(
+                                name,
+                                style: const TextStyle(fontSize: 10.5),
+                              ),
                               onPressed: () {
                                 setState(() {
                                   _host.text = host;
@@ -1040,11 +1198,29 @@ class _IperfPanelState extends State<IperfPanel> {
                 const SizedBox(height: 10),
                 Row(
                   children: [
-                    Expanded(child: PmField(controller: _streams, label: '并发流 (-P)', keyboardType: TextInputType.number)),
+                    Expanded(
+                      child: PmField(
+                        controller: _streams,
+                        label: '并发流 (-P)',
+                        keyboardType: TextInputType.number,
+                      ),
+                    ),
                     const SizedBox(width: 10),
-                    Expanded(child: PmField(controller: _duration, label: '时长秒 (-t)', keyboardType: TextInputType.number)),
+                    Expanded(
+                      child: PmField(
+                        controller: _duration,
+                        label: '时长秒 (-t)',
+                        keyboardType: TextInputType.number,
+                      ),
+                    ),
                     const SizedBox(width: 10),
-                    Expanded(child: PmField(controller: _interval, label: '报告间隔 (-i)', keyboardType: TextInputType.number)),
+                    Expanded(
+                      child: PmField(
+                        controller: _interval,
+                        label: '报告间隔 (-i)',
+                        keyboardType: TextInputType.number,
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 10),
@@ -1080,16 +1256,30 @@ class _IperfPanelState extends State<IperfPanel> {
               ],
               Row(
                 children: [
-                  Expanded(child: PmField(controller: _port, label: '端口 (-p)', keyboardType: TextInputType.number)),
+                  Expanded(
+                    child: PmField(
+                      controller: _port,
+                      label: '端口 (-p)',
+                      keyboardType: TextInputType.number,
+                    ),
+                  ),
                   const SizedBox(width: 12),
                   Padding(
                     padding: const EdgeInsets.only(top: 18),
                     child: PmPrimaryButton(
-                      label: running ? '停止' : (_role == 'server' ? '启动服务端' : '开始打流'),
+                      label: _task?.stopping == true
+                          ? '停止中…'
+                          : running
+                          ? '停止'
+                          : (_role == 'server' ? '启动服务端' : '开始打流'),
                       expand: false,
-                      icon: running ? Icons.stop_rounded : Icons.play_arrow_rounded,
+                      icon: running
+                          ? Icons.stop_rounded
+                          : Icons.play_arrow_rounded,
                       destructive: running,
-                      onPressed: running ? () => _task?.stop() : _start,
+                      onPressed: running && _task?.stopping != true
+                          ? () => _task?.stop()
+                          : (running ? null : _start),
                     ),
                   ),
                 ],
@@ -1115,16 +1305,26 @@ class _IperfPanelState extends State<IperfPanel> {
                       _binProblem != null
                           ? '解决上方问题后即可打流。'
                           : 'iperf3 输出将显示在这里。\n'
-                              '客户端示例：iperf3 -c <服务器> -p 5201 -P 4 -t 10 -i 1 -R\n'
-                              '也可自建：电脑端运行 iperf3 -s，手机连同一网络后填电脑 IP。',
-                      style: const TextStyle(color: Color(0xFF6E6E7A), fontSize: 11, height: 1.5, fontFamily: 'monospace'),
+                                '客户端示例：iperf3 -c <服务器> -p 5201 -P 4 -t 10 -i 1 -R\n'
+                                '也可自建：电脑端运行 iperf3 -s，手机连同一网络后填电脑 IP。',
+                      style: const TextStyle(
+                        color: Color(0xFF6E6E7A),
+                        fontSize: 11,
+                        height: 1.5,
+                        fontFamily: 'monospace',
+                      ),
                     ),
                   for (final line in _lines.reversed.take(60).toList().reversed)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 3),
                       child: Text(
                         line,
-                        style: const TextStyle(color: Color(0xFFB9F6CA), fontSize: 11, height: 1.45, fontFamily: 'monospace'),
+                        style: const TextStyle(
+                          color: Color(0xFFB9F6CA),
+                          fontSize: 11,
+                          height: 1.45,
+                          fontFamily: 'monospace',
+                        ),
                       ),
                     ),
                 ],
@@ -1136,7 +1336,10 @@ class _IperfPanelState extends State<IperfPanel> {
         Text(
           '内置 iperf3 由 BSD-3-Clause 授权（Lawrence Berkeley National Laboratory），以 libiperf3.so 形式随包提供；'
           '公共服务器来自 iperf.fr 公开列表，可用性以实际为准。',
-          style: context.text.bodySmall?.copyWith(color: pm.muted, fontSize: 11),
+          style: context.text.bodySmall?.copyWith(
+            color: pm.muted,
+            fontSize: 11,
+          ),
         ),
       ],
     );

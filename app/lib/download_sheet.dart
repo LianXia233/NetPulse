@@ -14,13 +14,16 @@ Future<void> showDownloadSheet(
   String initialUrl = '',
   Map<String, String> extraHeaders = const {},
   String? suggestedName,
+  List<Map<String, String>> extraDownloads = const [],
 }) {
   final store = AppScope.of(context);
   final url = TextEditingController(text: initialUrl);
   final name = TextEditingController(text: suggestedName ?? '');
   final mirrors = TextEditingController(text: store.downloadMirrors.join('\n'));
   final dns = TextEditingController(text: store.downloadDns.join('\n'));
-  final ua = TextEditingController(text: extraHeaders['User-Agent'] ?? store.downloadUserAgent);
+  final ua = TextEditingController(
+    text: extraHeaders['User-Agent'] ?? store.downloadUserAgent,
+  );
   final referer = TextEditingController(text: extraHeaders['Referer'] ?? '');
   final cookie = TextEditingController(text: extraHeaders['Cookie'] ?? '');
   final auth = TextEditingController(text: extraHeaders['Authorization'] ?? '');
@@ -29,6 +32,58 @@ Future<void> showDownloadSheet(
   var connections = store.downloadConnections.toDouble();
   var retries = store.downloadRetries.toDouble();
   var blockKb = store.downloadBlockKb.toDouble();
+
+  Future<void> enqueue(
+    String link, {
+    String? name,
+    Map<String, String> headers = const {},
+    String? dir,
+    List<String>? mirrors,
+    List<String>? dns,
+    int? connections,
+    int? blockKb,
+    int? retries,
+  }) async {
+    final targetDir = dir ?? store.downloadDirEffective;
+    final conn = connections ?? store.downloadConnections;
+    final block = blockKb ?? store.downloadBlockKb;
+    final tries = retries ?? store.downloadRetries;
+    final dnsServers = dns ?? store.downloadDns;
+    final mirrorList = mirrors ?? const <String>[];
+    final r = Core.i.call('start_download', {
+      'url': link,
+      'mirrors': mirrorList,
+      'dir': targetDir,
+      'name': name,
+      'connections': conn,
+      'block_kb': block,
+      'retries': tries,
+      'dns_servers': dnsServers,
+      'headers': headers,
+      'bind': store.downloadBind,
+      'ip_mode': store.downloadIpMode,
+      'dns_mode': store.downloadDnsMode,
+    });
+    if (r['ok'] != true) return;
+    final data = r['data'] as Map?;
+    store.upsertDownloadRecord({
+      'id': data?['task_id']?.toString() ?? '',
+      'url': link,
+      'name': data?['name']?.toString() ?? name ?? _recordName(link),
+      'dir': targetDir,
+      'kind': 'http',
+      'status': 'running',
+      'size': 0,
+      'done': 0,
+      'mirrors': mirrorList,
+      'headers': headers,
+      'dns': dnsServers,
+      'connections': conn,
+      'block_kb': block,
+      'retries': tries,
+      'created': DateTime.now().toIso8601String(),
+    });
+  }
 
   return showPmSheet(
     context,
@@ -40,7 +95,12 @@ Future<void> showDownloadSheet(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _SectionLabel('链接与来源'),
-            PmField(controller: url, label: '下载地址', hint: 'https://example.com/file.zip?sig=…', maxLines: 2),
+            PmField(
+              controller: url,
+              label: '下载地址',
+              hint: 'https://example.com/file.zip?sig=…',
+              maxLines: 2,
+            ),
             Align(
               alignment: Alignment.centerLeft,
               child: TextButton.icon(
@@ -53,15 +113,21 @@ Future<void> showDownloadSheet(
                   showResourceLinksSheet(
                     context,
                     sourceUrl: link,
-                    dir: dir.text.trim().isEmpty ? store.downloadDirEffective : dir.text.trim(),
+                    dir: dir.text.trim().isEmpty
+                        ? store.downloadDirEffective
+                        : dir.text.trim(),
                     connections: connections.round(),
                     blockKb: blockKb.round(),
                     retries: retries.round(),
                     headers: {
-                      if (ua.text.trim().isNotEmpty) 'User-Agent': ua.text.trim(),
-                      if (referer.text.trim().isNotEmpty) 'Referer': referer.text.trim(),
-                      if (cookie.text.trim().isNotEmpty) 'Cookie': cookie.text.trim(),
-                      if (auth.text.trim().isNotEmpty) 'Authorization': auth.text.trim(),
+                      if (ua.text.trim().isNotEmpty)
+                        'User-Agent': ua.text.trim(),
+                      if (referer.text.trim().isNotEmpty)
+                        'Referer': referer.text.trim(),
+                      if (cookie.text.trim().isNotEmpty)
+                        'Cookie': cookie.text.trim(),
+                      if (auth.text.trim().isNotEmpty)
+                        'Authorization': auth.text.trim(),
                     },
                   );
                 },
@@ -87,13 +153,18 @@ Future<void> showDownloadSheet(
                 onPressed: () async {
                   final path = await NativeInfo.selectDirectory();
                   if (path == null || path.isEmpty) {
-                    if (context.mounted) pmToast(context, '未选择目录，或需要先授予所有文件访问权限');
+                    if (context.mounted)
+                      pmToast(context, '未选择目录，或需要先授予所有文件访问权限');
                     return;
                   }
                   dir.text = path;
                   setSheet(() {});
                 },
-                icon: Icon(Icons.folder_open_rounded, color: context.scheme.primary, size: 20),
+                icon: Icon(
+                  Icons.folder_open_rounded,
+                  color: context.scheme.primary,
+                  size: 20,
+                ),
                 tooltip: '从文件管理器选择',
               ),
             ),
@@ -114,7 +185,8 @@ Future<void> showDownloadSheet(
               min: 64,
               max: 8192,
               divisions: 127,
-              display: (v) => '${(v / 1024).toStringAsFixed(v < 1024 ? 2 : 1)} MB',
+              display: (v) =>
+                  '${(v / 1024).toStringAsFixed(v < 1024 ? 2 : 1)} MB',
               onChanged: (v) => setSheet(() => blockKb = v),
             ),
             PmSliderRow(
@@ -137,11 +209,24 @@ Future<void> showDownloadSheet(
             const SizedBox(height: 10),
             PmField(controller: ua, label: 'User-Agent', maxLines: 2),
             const SizedBox(height: 10),
-            PmField(controller: referer, label: 'Referer', hint: '来源页，部分站点用于鉴权'),
+            PmField(
+              controller: referer,
+              label: 'Referer',
+              hint: '来源页，部分站点用于鉴权',
+            ),
             const SizedBox(height: 10),
-            PmField(controller: cookie, label: 'Cookie', maxLines: 2, hint: '从浏览器带入的会话信息'),
+            PmField(
+              controller: cookie,
+              label: 'Cookie',
+              maxLines: 2,
+              hint: '从浏览器带入的会话信息',
+            ),
             const SizedBox(height: 10),
-            PmField(controller: auth, label: 'Authorization', hint: 'Bearer … / Basic …'),
+            PmField(
+              controller: auth,
+              label: 'Authorization',
+              hint: 'Bearer … / Basic …',
+            ),
             const SizedBox(height: 10),
             PmField(
               controller: extra,
@@ -154,14 +239,38 @@ Future<void> showDownloadSheet(
               padding: const EdgeInsets.all(12),
               decoration: ShapeDecoration(
                 color: pm.block,
-                shape: RoundedSuperellipseBorder(borderRadius: BorderRadius.circular(12)),
+                shape: RoundedSuperellipseBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
               ),
               child: Text(
                 '保存到 ${dir.text.trim().isEmpty ? '${NativeInfo.filesDir}/downloads' : dir.text.trim()}\n'
                 '鉴权参数会原样透传给下载器（含查询串、Cookie、Referer 与自定义头）；Cookie/Authorization 仅保存在本机私有记录，不写入下载目录。',
-                style: context.text.bodySmall?.copyWith(color: pm.muted, height: 1.5),
+                style: context.text.bodySmall?.copyWith(
+                  color: pm.muted,
+                  height: 1.5,
+                ),
               ),
             ),
+            if (extraDownloads.isNotEmpty) ...[
+              const SizedBox(height: 12),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: ShapeDecoration(
+                  color: pm.block,
+                  shape: RoundedSuperellipseBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: Text(
+                  '该资源含独立音轨，下载视频时会同时加入 ${extraDownloads.length} 个音频任务；如需单个文件请用支持音视频合并的工具处理。',
+                  style: context.text.bodySmall?.copyWith(
+                    color: pm.muted,
+                    height: 1.5,
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 16),
             PmPrimaryButton(
               label: '开始下载',
@@ -169,7 +278,8 @@ Future<void> showDownloadSheet(
               onPressed: () async {
                 final link = url.text.trim();
                 final uri = Uri.tryParse(link);
-                if (uri == null || !(uri.scheme == 'http' || uri.scheme == 'https')) {
+                if (uri == null ||
+                    !(uri.scheme == 'http' || uri.scheme == 'https')) {
                   pmToast(context, '请输入 http/https 下载地址');
                   return;
                 }
@@ -180,9 +290,12 @@ Future<void> showDownloadSheet(
                 final headerMap = <String, String>{
                   ...extraHeaders,
                   if (ua.text.trim().isNotEmpty) 'User-Agent': ua.text.trim(),
-                  if (referer.text.trim().isNotEmpty) 'Referer': referer.text.trim(),
-                  if (cookie.text.trim().isNotEmpty) 'Cookie': cookie.text.trim(),
-                  if (auth.text.trim().isNotEmpty) 'Authorization': auth.text.trim(),
+                  if (referer.text.trim().isNotEmpty)
+                    'Referer': referer.text.trim(),
+                  if (cookie.text.trim().isNotEmpty)
+                    'Cookie': cookie.text.trim(),
+                  if (auth.text.trim().isNotEmpty)
+                    'Authorization': auth.text.trim(),
                 };
                 for (final line in extra.text.split('\n')) {
                   final i = line.indexOf(':');
@@ -202,7 +315,9 @@ Future<void> showDownloadSheet(
                     .map((e) => e.trim())
                     .where((e) => e.isNotEmpty)
                     .toList();
-                var saveDir = dir.text.trim().isEmpty ? store.downloadDirEffective : dir.text.trim();
+                var saveDir = dir.text.trim().isEmpty
+                    ? store.downloadDirEffective
+                    : dir.text.trim();
                 if (saveDir == kDefaultDownloadDir) {
                   final prepared = await NativeInfo.prepareDownloadDir();
                   if (prepared == null) {
@@ -233,8 +348,11 @@ Future<void> showDownloadSheet(
                   return;
                 }
                 final data = r['data'] as Map?;
-                final recordName = data?['name']?.toString() ??
-                    (name.text.trim().isEmpty ? _recordName(link) : name.text.trim());
+                final recordName =
+                    data?['name']?.toString() ??
+                    (name.text.trim().isEmpty
+                        ? _recordName(link)
+                        : name.text.trim());
                 final id = data?['task_id']?.toString() ?? '';
                 store.upsertDownloadRecord({
                   'id': id,
@@ -257,11 +375,32 @@ Future<void> showDownloadSheet(
                 store.setDownloadRetries(retries.round());
                 store.setDownloadBlockKb(blockKb.round());
                 store.setDownloadMirrors(mirrorList);
-                store.setDownloadDns(dnsList.isEmpty ? store.downloadDns : dnsList);
-                if (ua.text.trim().isNotEmpty) store.setDownloadUserAgent(ua.text.trim());
+                store.setDownloadDns(
+                  dnsList.isEmpty ? store.downloadDns : dnsList,
+                );
+                if (ua.text.trim().isNotEmpty)
+                  store.setDownloadUserAgent(ua.text.trim());
                 store.setDownloadDir(saveDir);
+                for (final item in extraDownloads) {
+                  final extraUrl = item['url']?.trim() ?? '';
+                  if (extraUrl.isEmpty) continue;
+                  await enqueue(
+                    extraUrl,
+                    name: item['name'],
+                    headers: headerMap,
+                    dir: saveDir,
+                    mirrors: mirrorList,
+                    dns: dnsList.isEmpty ? store.downloadDns : dnsList,
+                    connections: connections.round(),
+                    blockKb: blockKb.round(),
+                    retries: retries.round(),
+                  );
+                }
                 Navigator.pop(context);
-                pmToast(context, '已加入下载队列');
+                pmToast(
+                  context,
+                  '已加入下载队列${extraDownloads.isEmpty ? '' : '（含音轨）'}',
+                );
               },
             ),
           ],
@@ -273,7 +412,8 @@ Future<void> showDownloadSheet(
 
 String _recordName(String url) {
   final uri = Uri.tryParse(url);
-  final segs = uri?.pathSegments.where((e) => e.isNotEmpty).toList() ?? const <String>[];
+  final segs =
+      uri?.pathSegments.where((e) => e.isNotEmpty).toList() ?? const <String>[];
   if (segs.isEmpty) return 'netpulse_download.bin';
   var name = segs.last;
   if (name.endsWith('.m3u8')) return '${name.substring(0, name.length - 5)}.ts';

@@ -1,0 +1,54 @@
+{
+  "identity": "fluxdown@github-accel",
+  "name": "GitHub 加速",
+  "version": "1.0.0",
+  "description": "GitHub 文件下载自动加速：解析前对本次要下载的文件在各加速源上并行实测（Range 采样 64 KB），一次探测同时验证可用性与速度，选最快的改写直链；全部不可用则自动回退 GitHub 直连，加速失败绝不阻断下载。内置两个加速源——jsDelivr CDN（fastly.jsdelivr.net/gh，仅支持仓库内 blob/raw 文件、单文件 ≤ 20 MB，不支持 release 资产与源码归档）与 FastGit（fastgit.cc，hunshcn/gh-proxy 部署，release 资产 / archive 源码包 / 分支文件全类型）。覆盖 github.com（releases/download、archive、blob、raw）、raw.githubusercontent.com 与 gist.githubusercontent.com 链接。探测到 206 时回填 Range 支持让引擎直接多线程分段；同一链接会记住上次选中的源，续传恢复不换源。可在设置中固定加速源或直连，也可按行添加更多 gh-proxy 风格加速源参与测速，无需改代码即可扩展。",
+  "homepage": "https://github.com/zerx-lab/fluxdown-plugin-github-accel",
+  "minAppVersion": "0.1.60",
+  "resolvers": [
+    {
+      "match": {
+        "urls": [
+          "*://github.com/*",
+          "*://www.github.com/*",
+          "*://raw.githubusercontent.com/*",
+          "*://gist.githubusercontent.com/*"
+        ]
+      },
+      "entry": "resolve.js",
+      "timeoutMs": 25000
+    }
+  ],
+  "settings": [
+    {
+      "key": "preferred",
+      "title": "加速源",
+      "description": "自动 = 每次下载前并行测速，选最快且可用的源；固定某源后若其不可用仍会回退到其他可用源",
+      "type": "string",
+      "widget": "select",
+      "options": [
+        { "value": "auto", "label": "自动（测速优选）" },
+        { "value": "jsdelivr", "label": "jsDelivr CDN" },
+        { "value": "fastgit", "label": "FastGit（gh-proxy）" },
+        { "value": "direct", "label": "直连（禁用加速）" }
+      ],
+      "default": "auto"
+    },
+    {
+      "key": "extraProxies",
+      "title": "附加 gh-proxy 加速源",
+      "description": "每行一个 https:// 前缀（gh-proxy 风格，完整 GitHub 链接直接拼在其后），自动参与测速，例如 https://ghproxy.net/",
+      "type": "string",
+      "widget": "textarea",
+      "default": ""
+    },
+    {
+      "key": "verbose",
+      "title": "详细日志",
+      "description": "记录每个加速源的探测结果（状态码与耗时）",
+      "type": "boolean",
+      "widget": "toggle",
+      "default": "false"
+    }
+  ]
+}

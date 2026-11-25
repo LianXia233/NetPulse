@@ -39,7 +39,15 @@ NetPulse 自身源码基于 [MIT License](LICENSE) 开源。
 | **flate2** | 静态链接 Rust Crate | [MIT](https://opensource.org/licenses/MIT) / [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) | Gzip / Deflate 解压缩（IP 种子库与 HTTP 传输） | [github.com/rust-lang/flate2-rs](https://github.com/rust-lang/flate2-rs) |
 | **regex** | 静态链接 Rust Crate | [MIT](https://opensource.org/licenses/MIT) / [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) | HLS M3U8 清单解析与 URL 规则提取 | [github.com/rust-lang/regex](https://github.com/rust-lang/regex) |
 | **idna** | 静态链接 Rust Crate | [MIT](https://opensource.org/licenses/MIT) / [Apache-2.0](https://www.apache.org/licenses/LICENSE-2.0) | 国际化域名 (IDN) Punycode 转换与 URL 标准化 | [github.com/servo/rust-url](https://github.com/servo/rust-url) |
+| **M3U8 超级下载器 Pro** | 站点解析器 JS 资源 | [MIT](https://github.com/Ouyangyouzi/fluxdown-m3u8-pro/blob/main/LICENSE) | M3U8 主列表清晰度枚举与防盗链头补齐 | [github.com/Ouyangyouzi/fluxdown-m3u8-pro](https://github.com/Ouyangyouzi/fluxdown-m3u8-pro) |
+| **GitHub 加速** | 站点解析器 JS 资源 | 上游未声明 | GitHub Release / archive / raw 多源测速改写 | [github.com/zerx-lab/fluxdown-plugin-github-accel](https://github.com/zerx-lab/fluxdown-plugin-github-accel) |
+| **Quark Share Resolver** | 站点解析器 JS 资源 | 上游未声明 | 夸克网盘分享目录解析与临时直链 | [github.com/myderr/fluxdown-quark-share](https://github.com/myderr/fluxdown-quark-share) |
+| **账号直链 (accountdl)** | 站点解析器 JS 资源 | 上游未声明 | 百度 / 115 / 123 / 蓝奏 / B 站 / Pixiv / 知网账号直链 | [github.com/zerx-lab/fluxdown-plugin-accountdl](https://github.com/zerx-lab/fluxdown-plugin-accountdl) |
+| **全网音乐下载 (musicdl)** | 站点解析器 JS 资源 | 上游未声明 | 网易云 / QQ / 酷狗 / 酷我歌曲页解析 | [github.com/zerx-lab/fluxdown-plugin-musicdl](https://github.com/zerx-lab/fluxdown-plugin-musicdl) |
+| **Bilibili Bangumi** | 站点解析器 JS 资源 | 上游未声明 | B 站番剧 / 投稿 / 短链 DASH 解析 | [github.com/gulanthys/fluxdown-bilibili-bangumi](https://github.com/gulanthys/fluxdown-bilibili-bangumi) |
 | **DB-IP Lite** | 静态压缩种子库 (`.tsv.gz`) | [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/) | 约 43 万条国家/地区离线 IPv4 地址段归属数据 | [db-ip.com](https://db-ip.com) |
+
+> 站点解析器均为可选的内置适配层，源码与许可证状态见 [`app/assets/plugins/NOTICE.md`](app/assets/plugins/NOTICE.md)。其中只有 M3U8 Pro 声明了 MIT 许可，其余仓库未声明许可证；若需二次分发请先获得上游作者授权。
 
 > 📌 **系统库说明**：Android System WebView 由用户终端 Android 操作系统自带并提供渲染引擎，不随本安装包分发。
 

@@ -18,3 +18,13 @@ dev_dependencies:
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/plugins/index.json
+    - assets/plugins/NOTICE.md
+    - assets/plugins/m3u8-pro/
+    - assets/plugins/github-accel/
+    - assets/plugins/quark-share/
+    - assets/plugins/accountdl/
+    - assets/plugins/accountdl/page/
+    - assets/plugins/musicdl/
+    - assets/plugins/bilibili/

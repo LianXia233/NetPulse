@@ -1,0 +1,44 @@
+{
+  "identity": "musicdl@musicdl",
+  "name": "全网音乐下载",
+  "version": "0.1.1",
+  "description": "搜索歌曲或粘贴网易云 / QQ / 酷狗 / 酷我音乐的歌曲链接，一键下载音乐；在音乐网站的歌曲页直接下载。音源来自煎饼搜（jbsou.cn），可用性以该站为准。",
+  "resolvers": [
+    {
+      "match": {
+        "urls": [
+          "*://www.jbsou.cn/?*",
+          "*://music.163.com/*song*",
+          "*://y.music.163.com/m/song*",
+          "*://y.qq.com/n/ryqq/songDetail/*",
+          "*://y.qq.com/n/yqq/song/*",
+          "*://i.y.qq.com/v8/playsong.html*",
+          "*://www.kugou.com/song/*",
+          "*://www.kuwo.cn/play_detail/*"
+        ]
+      },
+      "entry": "resolve.js",
+      "timeoutMs": 30000
+    }
+  ],
+  "main": { "entry": "main.js" },
+  "contributes": {
+    "views": [{ "id": "home", "title": "全网音乐", "location": "activity", "icon": "icons/music.svg", "desktop": { "entry": "ui/home.js" } }],
+    "pageScripts": [
+      {
+        "id": "song",
+        "title": "音乐网站歌曲页「下载」按钮",
+        "matches": [
+          "*://music.163.com/*",
+          "*://y.qq.com/*",
+          "*://www.kugou.com/*",
+          "*://www.kuwo.cn/*"
+        ],
+        "js": ["page/song.js"],
+        "runAt": "document_idle",
+        "allFrames": true
+      }
+    ]
+  },
+  "permissions": ["tasks", "desktop", "pageScripts"]
+}

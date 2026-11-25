@@ -10,6 +10,7 @@ mod http;
 pub mod ipdb;
 pub mod ipgeo;
 mod speed;
+mod webfetch;
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -99,7 +100,7 @@ fn handle(cmd: &str, args: &Value) -> Result<Value, String> {
         "version" => Ok(json!({
             "core": env!("CARGO_PKG_VERSION"),
             "engine": "netpulse-core-rust",
-            "features": ["multi_cdn", "multi_dns", "download", "upload", "dns", "ping", "nat", "trace", "iperf"]
+            "features": ["multi_cdn", "multi_dns", "download", "upload", "dns", "ping", "nat", "trace", "iperf", "web_fetch"]
         })),
         "start_speed" => speed::start(args.clone()),
         "start_download" => download::add(args.clone()),
@@ -113,6 +114,7 @@ fn handle(cmd: &str, args: &Value) -> Result<Value, String> {
         "start_nat" => diag::start_nat(args.clone()),
         "start_trace" => diag::start_trace(args.clone()),
         "start_iperf" => diag::start_iperf(args.clone()),
+        "web_fetch" => webfetch::fetch(args),
         "ipdb_update" => ipgeo::update(args),
         "ipdb_info" => ipgeo::info(args),
         "ipdb_lookup" => ipgeo::lookup(args),
@@ -163,7 +165,9 @@ fn dispatch(raw: &str) -> String {
     let parsed: Result<Value, _> = serde_json::from_str(raw);
     let v = match parsed {
         Ok(v) => v,
-        Err(e) => return json!({"ok": false, "error": format!("JSON 解析失败: {}", e)}).to_string(),
+        Err(e) => {
+            return json!({"ok": false, "error": format!("JSON 解析失败: {}", e)}).to_string()
+        }
     };
     let cmd = v["cmd"].as_str().unwrap_or("");
     let args = v.get("args").cloned().unwrap_or_else(|| json!({}));

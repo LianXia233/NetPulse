@@ -1,6 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+
 import 'package:flutter/material.dart';
+
 import 'bridge.dart';
 import 'theme.dart';
 
@@ -24,24 +27,24 @@ class HistoryRecord {
   final Map<String, dynamic> detail;
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'kind': kind,
-        'time': time.toIso8601String(),
-        'title': title,
-        'value': value,
-        'unit': unit,
-        'detail': detail,
-      };
+    'id': id,
+    'kind': kind,
+    'time': time.toIso8601String(),
+    'title': title,
+    'value': value,
+    'unit': unit,
+    'detail': detail,
+  };
 
   static HistoryRecord fromJson(Map<String, dynamic> j) => HistoryRecord(
-        id: j['id']?.toString() ?? '',
-        kind: j['kind']?.toString() ?? 'speed',
-        time: DateTime.tryParse(j['time']?.toString() ?? '') ?? DateTime.now(),
-        title: j['title']?.toString() ?? '',
-        value: j['value']?.toString() ?? '',
-        unit: j['unit']?.toString() ?? '',
-        detail: (j['detail'] as Map?)?.cast<String, dynamic>() ?? {},
-      );
+    id: j['id']?.toString() ?? '',
+    kind: j['kind']?.toString() ?? 'speed',
+    time: DateTime.tryParse(j['time']?.toString() ?? '') ?? DateTime.now(),
+    title: j['title']?.toString() ?? '',
+    value: j['value']?.toString() ?? '',
+    unit: j['unit']?.toString() ?? '',
+    detail: (j['detail'] as Map?)?.cast<String, dynamic>() ?? {},
+  );
 }
 
 const String kDefaultDownloadDir = '/storage/emulated/0/Download/NetPulse';
@@ -148,12 +151,20 @@ class AppStore extends ChangeNotifier {
   String get downloadDirEffective =>
       downloadDir.trim().isEmpty ? kDefaultDownloadDir : downloadDir.trim();
   List<HistoryRecord> history = [];
+
   /// 下载任务记录：进程被杀后仍能在下载页恢复并继续断点续传。
   List<Map<String, dynamic>> downloadRecords = [];
 
+  /// 站点解析器（FluxDown 兼容插件）的用户设置，按插件 id 分组。
+  Map<String, Map<String, String>> pluginSettings = {};
+
+  /// 插件自己的持久化键值（登录态缓存、加速源选择等）。
+  Map<String, String> pluginStorage = {};
+
   String _path = '';
 
-  String get uploadCandidates => uploadEndpoints.isEmpty ? uploadEndpoint : uploadEndpoints.join('\n');
+  String get uploadCandidates =>
+      uploadEndpoints.isEmpty ? uploadEndpoint : uploadEndpoints.join('\n');
 
   List<String> get speedEndpoints => endpoints;
 
@@ -172,28 +183,46 @@ class AppStore extends ChangeNotifier {
         durationSec = (j['durationSec'] as int? ?? 15).clamp(3, 120);
         sampleMs = (j['sampleMs'] as int? ?? 1000).clamp(100, 2000);
         if (j['endpoints'] is List) {
-          endpoints = (j['endpoints'] as List).map((e) => e.toString()).toList();
+          endpoints = (j['endpoints'] as List)
+              .map((e) => e.toString())
+              .toList();
         }
         if (j['dnsServers'] is List) {
-          dnsServers = normalizeDnsList((j['dnsServers'] as List).map((e) => e.toString()));
+          dnsServers = normalizeDnsList(
+            (j['dnsServers'] as List).map((e) => e.toString()),
+          );
         }
         uploadEndpoint = j['uploadEndpoint']?.toString() ?? uploadEndpoint;
         if (j['uploadEndpoints'] is List) {
-          uploadEndpoints = (j['uploadEndpoints'] as List).map((e) => e.toString()).where((e) => e.isNotEmpty).toList();
+          uploadEndpoints = (j['uploadEndpoints'] as List)
+              .map((e) => e.toString())
+              .where((e) => e.isNotEmpty)
+              .toList();
         } else if (uploadEndpoint.isNotEmpty) {
           uploadEndpoints = [uploadEndpoint];
         }
         if (uploadEndpoints.isNotEmpty) uploadEndpoint = uploadEndpoints.first;
-        downloadConnections = (j['downloadConnections'] as int? ?? 8).clamp(1, 32);
-        downloadBlockKb = (j['downloadBlockKb'] as int? ?? 1024).clamp(64, 8192);
+        downloadConnections = (j['downloadConnections'] as int? ?? 8).clamp(
+          1,
+          32,
+        );
+        downloadBlockKb = (j['downloadBlockKb'] as int? ?? 1024).clamp(
+          64,
+          8192,
+        );
         downloadRetries = (j['downloadRetries'] as int? ?? 2).clamp(0, 10);
         if (j['downloadMirrors'] is List) {
-          downloadMirrors = (j['downloadMirrors'] as List).map((e) => e.toString()).toList();
+          downloadMirrors = (j['downloadMirrors'] as List)
+              .map((e) => e.toString())
+              .toList();
         }
         if (j['downloadDns'] is List) {
-          downloadDns = normalizeDnsList((j['downloadDns'] as List).map((e) => e.toString()));
+          downloadDns = normalizeDnsList(
+            (j['downloadDns'] as List).map((e) => e.toString()),
+          );
         }
-        downloadUserAgent = j['downloadUserAgent']?.toString() ?? downloadUserAgent;
+        downloadUserAgent =
+            j['downloadUserAgent']?.toString() ?? downloadUserAgent;
         downloadDir = j['downloadDir']?.toString() ?? downloadDir;
         if (downloadDir.trim().isEmpty) downloadDir = kDefaultDownloadDir;
         downloadBind = j['downloadBind']?.toString() ?? downloadBind;
@@ -226,6 +255,21 @@ class AppStore extends ChangeNotifier {
               .map((e) => e.cast<String, dynamic>())
               .where((e) => (e['url']?.toString() ?? '').isNotEmpty)
               .toList();
+        }
+        if (j['pluginSettings'] is Map) {
+          final raw = j['pluginSettings'] as Map;
+          pluginSettings = {
+            for (final e in raw.entries)
+              if (e.value is Map)
+                e.key.toString(): (e.value as Map).map(
+                  (k, v) => MapEntry(k.toString(), v?.toString() ?? ''),
+                ),
+          };
+        }
+        if (j['pluginStorage'] is Map) {
+          pluginStorage = (j['pluginStorage'] as Map).map(
+            (k, v) => MapEntry(k.toString(), v?.toString() ?? ''),
+          );
         }
       }
     } catch (_) {}
@@ -270,10 +314,34 @@ class AppStore extends ChangeNotifier {
       'browserIntercept': browserIntercept,
       'history': history.map((e) => e.toJson()).toList(),
       'downloadRecords': downloadRecords,
+      'pluginSettings': pluginSettings,
+      'pluginStorage': pluginStorage,
     };
     try {
       await File(_path).writeAsString(jsonEncode(j));
     } catch (_) {}
+  }
+
+  Map<String, String> pluginSettingsOf(String id) =>
+      Map<String, String>.from(pluginSettings[id] ?? const {});
+
+  void setPluginSetting(String id, String key, String value) {
+    final next = Map<String, String>.from(pluginSettings[id] ?? const {});
+    if (value.isEmpty) {
+      next.remove(key);
+    } else {
+      next[key] = value;
+    }
+    pluginSettings = {...pluginSettings, id: next};
+    notifyListeners();
+    unawaited(save());
+  }
+
+  String? pluginStorageGet(String key) => pluginStorage[key];
+
+  void pluginStorageSet(String key, String value) {
+    pluginStorage = {...pluginStorage, key: value};
+    unawaited(save());
   }
 
   void setThemeMode(ThemeMode mode) {
@@ -445,7 +513,10 @@ class AppStore extends ChangeNotifier {
   }
 
   void setUploadEndpoints(List<String> value) {
-    uploadEndpoints = value.where((e) => e.trim().isNotEmpty).map((e) => e.trim()).toList();
+    uploadEndpoints = value
+        .where((e) => e.trim().isNotEmpty)
+        .map((e) => e.trim())
+        .toList();
     uploadEndpoint = uploadEndpoints.isEmpty ? '' : uploadEndpoints.first;
     save();
     notifyListeners();
@@ -475,12 +546,15 @@ class AppStore extends ChangeNotifier {
     bool notify = false,
   }) {
     final key = downloadRecordKey(record);
-    final index = downloadRecords.indexWhere((r) => downloadRecordKey(r) == key);
+    final index = downloadRecords.indexWhere(
+      (r) => downloadRecordKey(r) == key,
+    );
     if (index >= 0) {
       downloadRecords[index] = record;
     } else {
       downloadRecords.insert(0, record);
-      if (downloadRecords.length > 200) downloadRecords.removeRange(200, downloadRecords.length);
+      if (downloadRecords.length > 200)
+        downloadRecords.removeRange(200, downloadRecords.length);
     }
     if (persist) save();
     if (notify) notifyListeners();
@@ -491,8 +565,14 @@ class AppStore extends ChangeNotifier {
     save();
   }
 
-  void updateDownloadRecordProgress(String key, Map<String, dynamic> patch, {bool persist = false}) {
-    final index = downloadRecords.indexWhere((r) => downloadRecordKey(r) == key);
+  void updateDownloadRecordProgress(
+    String key,
+    Map<String, dynamic> patch, {
+    bool persist = false,
+  }) {
+    final index = downloadRecords.indexWhere(
+      (r) => downloadRecordKey(r) == key,
+    );
     if (index < 0) return;
     final next = {...downloadRecords[index], ...patch};
     downloadRecords[index] = next;
@@ -519,7 +599,7 @@ class AppStore extends ChangeNotifier {
 
 class AppScope extends InheritedNotifier<AppStore> {
   const AppScope({super.key, required AppStore store, required super.child})
-      : super(notifier: store);
+    : super(notifier: store);
 
   static AppStore of(BuildContext context) {
     final scope = context.dependOnInheritedWidgetOfExactType<AppScope>();

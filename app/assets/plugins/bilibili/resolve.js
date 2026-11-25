@@ -1,0 +1,1985 @@
+// NetPulse 独立 Bilibili 番剧插件。
+//
+// 两段式 resolver：
+//   1. 番剧 season/media 链接 → 调 B 站番剧接口，返回正片/番外分集 manifest；
+//   2. manifest 条目启动时 → 用 resolverItem(ep:<id>) 调 B 站播放接口取得 DASH
+//      视频/音频短期直链，再交回 NetPulse 下载引擎。
+//
+// 追番与 UP 主更新由 NetPulse 的 subscribe 契约调度；插件只负责返回有限批次，
+// 不创建后台定时器或直接建下载任务。
+
+var API_BASE = 'https://api.bilibili.com';
+var USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+  '(KHTML, like Gecko) Chrome/131.0 Safari/537.36';
+var MAX_EPISODES = 1000;
+var MAX_VARIANTS = 16;
+var BFE_ID_KEY = 'auth.bfe_id';
+var MAX_MANIFEST_PATH_CHARS = 180;
+// bili32 使用通用播放器接口时携带的 session 参数；番剧分集也能通过
+// bvid + cid 走同一接口，并返回完整的 DASH 画质列表。
+var PLAYER_SESSION = '68191c1dc3c75042c6f35fba895d65b0';
+
+// DASH 返回的 height 通常存在，但部分接口/账号组合只返回画质码 id。
+// 这些是 Bilibili Web 播放接口常见的画质码，作为 height 缺失时的回退。
+var QUALITY_HEIGHT_BY_ID = {
+  127: 4320, // 8K
+  126: 1080, // 杜比视界
+  125: 1080, // HDR
+  120: 2160, // 4K
+  116: 1080, // 1080P 60帧
+  112: 1080, // 1080P+
+  80: 1080,
+  74: 720,
+  64: 720,
+  32: 480,
+  16: 360,
+};
+
+function setting(name, fallback) {
+  var value = flux.settings[name];
+  return value == null ? fallback : value;
+}
+function pluginLog(level) {
+  try {
+    var logger = flux && flux.logger;
+    if (!logger || typeof logger[level] !== 'function') return;
+    var args = Array.prototype.slice.call(arguments, 1);
+    logger[level].apply(logger, args);
+  } catch (e) {}
+}
+
+function playQualityDiagnostics(play) {
+  var value = play || {};
+  var dash = value.dash && typeof value.dash === 'object' ? value.dash : {};
+  var videos = Array.isArray(dash.video) ? dash.video : [];
+  var formats = Array.isArray(value.support_formats) ? value.support_formats : [];
+  var quality = Array.isArray(value.accept_quality) ? value.accept_quality.map(function(item) { return Number(item) || item; }) : [];
+  var heights = videos.map(function(video) {
+    return { id: Number(video && (video.id || video.quality)) || 0, height: Number(video && (video.height || video.height_cm)) || 0, width: Number(video && video.width) || 0, codec: String(video && (video.codecs || video.codecs_name) || '') };
+  }).filter(function(item) { return item.id || item.height; });
+  heights.sort(function(a, b) { return b.height - a.height || b.id - a.id; });
+  return {
+    acceptQuality: quality,
+    supportFormats: formats.map(function(item) { return { quality: Number(item && (item.quality || item.quality_id)) || 0, format: String(item && (item.format || item.new_description || item.display_desc) || '') }; }),
+    dashVideo: heights.slice(0, 16),
+    dashMaxHeight: heights.reduce(function(max, item) { return Math.max(max, item.height); }, 0),
+    durlQuality: Number(value.quality) || 0
+  };
+}
+
+function logAuthDiagnostics(source, cookie, payload) {
+  var data = payload && payload.data ? payload.data : {};
+  pluginLog('info', '[bilibili] auth diagnostics', { source: source, hasSessdata: cookieContains(cookie, 'SESSDATA'), isLogin: data.isLogin === true, hasWbiImage: Boolean(data.wbi_img && data.wbi_img.img_url && data.wbi_img.sub_url) });
+}
+
+function truncateCodePoints(value, maxLength) {
+  return Array.from(String(value || '')).slice(0, Math.max(0, maxLength)).join('');
+}
+
+function sanitizeFileName(name) {
+  return truncateCodePoints((name || 'video')
+    .replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ')
+    .replace(/\.{2,}/g, '.')
+    .replace(/\s+/g, ' ')
+    .trim(), 120).replace(/[.\s]+$/, '') || 'video';
+}
+
+function sanitizePath(name) {
+  var value = sanitizeFileName(name).replace(/[.]/g, ' ');
+  return truncateCodePoints(value, 80).trim();
+}
+
+
+function fitManifestItems(items) {
+  var usedNames = Object.create(null);
+  return items.map(function(item) {
+    var path = String(item.path || '');
+    var pathLength = Array.from(path).length;
+    var nameBudget = MAX_MANIFEST_PATH_CHARS - pathLength - (path ? 1 : 0);
+    if (nameBudget < 1) throw new Error('番剧目录名超过 NetPulse 清单路径长度上限');
+    var rawName = String(item.name || 'video');
+    var dot = rawName.lastIndexOf('.');
+    var extension = dot > 0 ? rawName.slice(dot) : '';
+    if (Array.from(extension).length >= nameBudget) throw new Error('番剧文件扩展名超过 NetPulse 清单路径长度上限');
+    var stem = extension ? rawName.slice(0, dot) : rawName;
+    var pathKey = path.toLowerCase();
+    if (!usedNames[pathKey]) usedNames[pathKey] = Object.create(null);
+    var names = usedNames[pathKey];
+    var candidate = '';
+    for (var duplicate = 1; duplicate <= 10000; duplicate++) {
+      var suffix = duplicate === 1 ? '' : ' (' + duplicate + ')';
+      var stemBudget = nameBudget - Array.from(extension + suffix).length;
+      if (stemBudget < 1) throw new Error('同目录中的番剧文件名无法唯一化');
+      candidate = (truncateCodePoints(stem, stemBudget).replace(/[.\s]+$/, '') || 'v') + suffix + extension;
+      if (!names[candidate.toLowerCase()]) break;
+      candidate = '';
+    }
+    if (!candidate) throw new Error('同目录中的番剧文件名数量超过上限');
+    names[candidate.toLowerCase()] = true;
+    return Object.assign({}, item, { name: candidate });
+  });
+}
+
+
+function cookieHeaderFromNetscape(raw) {
+  var lines = String(raw || '').split(/\r?\n/);
+  var pairs = [];
+  var now = Math.floor(Date.now() / 1000);
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i].trim();
+    if (!line) continue;
+    // Netscape 导出会用 #HttpOnly_ 前缀标识 HttpOnly cookie；它不是注释。
+    if (line.indexOf('#HttpOnly_') === 0) line = line.slice('#HttpOnly_'.length);
+    else if (line[0] === '#') continue;
+    var fields = line.split('\t');
+    if (fields.length < 7 || !fields[5]) continue;
+    var rawDomain = String(fields[0] || '').toLowerCase();
+    var domain = rawDomain.replace(/^\./, '');
+    var apiHost = 'api.bilibili.com';
+    var includeSubdomains = String(fields[1]).toUpperCase() === 'TRUE';
+    var belongsToBilibili = domain === 'bilibili.com' || domain.endsWith('.bilibili.com');
+    var domainMatches = belongsToBilibili && (domain === apiHost || (includeSubdomains && apiHost.endsWith('.' + domain)));
+    var cookiePath = String(fields[2] || '/');
+    var secure = String(fields[3]).toUpperCase() === 'TRUE';
+    var expires = Number(fields[4]) || 0;
+    if (!domainMatches || cookiePath !== '/' || (secure && !API_BASE.startsWith('https://')) || (expires > 0 && expires <= now)) continue;
+    pairs.push(fields[5] + '=' + fields.slice(6).join('\t'));
+  }
+  return pairs.join('; ');
+}
+
+function cookieHeader(raw) {
+  var value = String(raw || '').trim();
+  if (!value) return '';
+  if (/^#\s*(Netscape|HTTP Cookie File)/i.test(value) || /\t/.test(value)) {
+    return cookieHeaderFromNetscape(value);
+  }
+  return value.replace(/[\r\n]+/g, ' ').trim();
+}
+
+function normalizeSessdataCookie(cookie) {
+  return String(cookie || '').replace(/(^|;\s*)SESSDATA=([^;]*)/i, function(_, prefix, value) {
+    return prefix + 'SESSDATA=' + String(value || '').replace(/,/g, '%2C').replace(/\*/g, '%2A');
+  });
+}
+
+async function cookieFromAuthProfile() {
+  if (!flux.auth || typeof flux.auth.get !== 'function') return '';
+  var apiAuthRef = 'gulanthys@bilibili-bangumi::https://api.bilibili.com';
+  try {
+    var raw = await flux.storage.get('auth.refs');
+    var parsed = raw ? JSON.parse(raw) : [];
+    if (Array.isArray(parsed)) {
+      var hasApiRef = parsed.some(function(ref) {
+        return String(ref || '').replace('::api.bilibili.com', '::https://api.bilibili.com') === apiAuthRef;
+      });
+      if (parsed.length && !hasApiRef) return '';
+    }
+  } catch (e) {}
+  try {
+    var profile = await flux.auth.get(apiAuthRef);
+    var expiresAt = Number(profile && profile.expiresAt) || 0;
+    if (profile && (!expiresAt || expiresAt > Math.floor(Date.now() / 1000))) {
+      var profileCookie = cookieHeader(profile.cookies || '');
+      if (/(?:^|;\s*)SESSDATA=/i.test(profileCookie)) return profileCookie;
+    }
+  } catch (e) {}
+  return '';
+}
+
+async function effectiveCookie(ctx) {
+  var raw = String((ctx && ctx.cookies) || '').trim();
+  if (!raw) raw = String(setting('cookies', '') || '').trim();
+  var cookie = normalizeSessdataCookie(cookieHeader(raw));
+  if (cookie) return await appendStoredBfeId(cookie);
+  var profileCookie = await cookieFromAuthProfile();
+  return profileCookie ? await appendStoredBfeId(profileCookie) : '';
+}
+
+function cookieContains(cookie, name) {
+  return new RegExp('(?:^|;\\s*)' + String(name).replace(/[.*+?^${}()|[\\]\\]/g, '\\$&') + '=', 'i').test(String(cookie || ''));
+}
+
+async function appendStoredBfeId(cookie) {
+  var value = String(cookie || '').trim();
+  if (!value || cookieContains(value, 'bfe_id')) return value;
+  try {
+    var bfeId = await flux.storage.get(BFE_ID_KEY);
+    if (bfeId) return value + '; bfe_id=' + String(bfeId).trim();
+  } catch (e) {}
+  return value;
+}
+
+
+function responseHeader(response, name) {
+  var headers = response && response.headers ? response.headers : {};
+  var keys = Object.keys(headers);
+  for (var i = 0; i < keys.length; i++) {
+    if (keys[i].toLowerCase() === String(name).toLowerCase()) return String(headers[keys[i]] || '');
+  }
+  return '';
+}
+
+async function rememberResponseBfeId(response) {
+  var setCookie = responseHeader(response, 'set-cookie');
+  var match = /(?:^|[;\\n,]\\s*)bfe_id=([^;\\n,]+)/i.exec(setCookie);
+  if (!match || !match[1]) return;
+  try { await flux.storage.set(BFE_ID_KEY, match[1].trim()); } catch (e) {}
+}
+
+function hasHeader(headers, name) {
+  var target = String(name || '').toLowerCase();
+  var keys = Object.keys(headers || {});
+  for (var i = 0; i < keys.length; i++) {
+    if (keys[i].toLowerCase() === target) return true;
+  }
+  return false;
+}
+
+function requestHeaders(cookie, ctx) {
+  var headers = {
+    Accept: 'application/json, text/plain, */*',
+    Referer: 'https://www.bilibili.com/',
+    'User-Agent': USER_AGENT,
+  };
+  var taskHeaders = ctx && ctx.extraHeaders;
+  if (taskHeaders && typeof taskHeaders === 'object') {
+    var keys = Object.keys(taskHeaders);
+    for (var i = 0; i < keys.length; i++) {
+      if (taskHeaders[keys[i]] != null) headers[keys[i]] = String(taskHeaders[keys[i]]);
+    }
+  }
+  if (ctx && ctx.referrer) headers.Referer = String(ctx.referrer);
+  if (ctx && ctx.userAgent) headers['User-Agent'] = String(ctx.userAgent);
+  if (cookie) headers.Cookie = cookie;
+  return headers;
+}
+
+
+
+async function apiGet(path, ctx, cookie) {
+  var response;
+  try {
+    var requestCookie = cookie || await effectiveCookie(ctx);
+    response = await flux.fetch({
+      method: 'GET',
+      url: API_BASE + path,
+      headers: requestHeaders(requestCookie, ctx),
+    });
+  } catch (e) {
+    throw new Error('Bilibili 接口请求失败: ' + String(e));
+  }
+
+  if (!response || response.status < 200 || response.status >= 300) {
+    throw new Error('Bilibili 接口 HTTP 状态异常: ' + String(response && response.status));
+  }
+
+  var payload;
+  try {
+    payload = JSON.parse(response.body || '');
+  } catch (e) {
+    throw new Error('Bilibili 接口返回非法 JSON: ' + String(e));
+  }
+  if (!payload || Number(payload.code) !== 0) {
+    throw new Error(
+      'Bilibili 接口错误 code=' + String(payload && payload.code) +
+      ': ' + String((payload && payload.message) || 'unknown')
+    );
+  }
+  await rememberResponseBfeId(response);
+  // PGC 接口返回 result，通用播放器接口返回 data。
+  var result = payload.result || payload.data || {};
+  if (/\/playurl(?:\?|$)/.test(path)) {
+    pluginLog('info', '[bilibili] playurl diagnostics', {
+      hasSessdata: cookieContains(requestCookie, 'SESSDATA'),
+      diagnostics: playQualityDiagnostics(result),
+    });
+  }
+  return result;
+}
+
+function md5(input) {
+  function safeAdd(x, y) {
+    var lsw = (x & 65535) + (y & 65535);
+    return (((x >>> 16) + (y >>> 16) + (lsw >>> 16)) << 16) | (lsw & 65535);
+  }
+  function bitRol(num, cnt) { return (num << cnt) | (num >>> (32 - cnt)); }
+  function cmn(q, a, b, x, s, t) { return safeAdd(bitRol(safeAdd(safeAdd(a, q), safeAdd(x, t)), s), b); }
+  function ff(a, b, c, d, x, s, t) { return cmn((b & c) | ((~b) & d), a, b, x, s, t); }
+  function gg(a, b, c, d, x, s, t) { return cmn((b & d) | (c & (~d)), a, b, x, s, t); }
+  function hh(a, b, c, d, x, s, t) { return cmn(b ^ c ^ d, a, b, x, s, t); }
+  function ii(a, b, c, d, x, s, t) { return cmn(c ^ (b | (~d)), a, b, x, s, t); }
+  function words(value) {
+    var bytes = unescape(encodeURIComponent(String(value)));
+    var n = bytes.length, count = ((n + 8) >>> 6) + 1, result = new Array(count * 16);
+    for (var i = 0; i < result.length; i++) result[i] = 0;
+    for (var j = 0; j < n; j++) result[j >> 2] |= bytes.charCodeAt(j) << ((j % 4) * 8);
+    result[n >> 2] |= 0x80 << ((n % 4) * 8);
+    result[count * 16 - 2] = n * 8;
+    return result;
+  }
+  function hex(value) {
+    var table = '0123456789abcdef', out = '';
+    for (var i = 0; i < 4; i++) out += table.charAt((value >>> (i * 8 + 4)) & 15) + table.charAt((value >>> (i * 8)) & 15);
+    return out;
+  }
+  var x = words(input), a = 0x67452301, b = 0xefcdab89, c = 0x98badcfe, d = 0x10325476;
+  for (var i = 0; i < x.length; i += 16) {
+    var oa = a, ob = b, oc = c, od = d;
+    a = ff(a,b,c,d,x[i+0],7,0xd76aa478); d = ff(d,a,b,c,x[i+1],12,0xe8c7b756); c = ff(c,d,a,b,x[i+2],17,0x242070db); b = ff(b,c,d,a,x[i+3],22,0xc1bdceee);
+    a = ff(a,b,c,d,x[i+4],7,0xf57c0faf); d = ff(d,a,b,c,x[i+5],12,0x4787c62a); c = ff(c,d,a,b,x[i+6],17,0xa8304613); b = ff(b,c,d,a,x[i+7],22,0xfd469501);
+    a = ff(a,b,c,d,x[i+8],7,0x698098d8); d = ff(d,a,b,c,x[i+9],12,0x8b44f7af); c = ff(c,d,a,b,x[i+10],17,0xffff5bb1); b = ff(b,c,d,a,x[i+11],22,0x895cd7be);
+    a = ff(a,b,c,d,x[i+12],7,0x6b901122); d = ff(d,a,b,c,x[i+13],12,0xfd987193); c = ff(c,d,a,b,x[i+14],17,0xa679438e); b = ff(b,c,d,a,x[i+15],22,0x49b40821);
+    a = gg(a,b,c,d,x[i+1],5,0xf61e2562); d = gg(d,a,b,c,x[i+6],9,0xc040b340); c = gg(c,d,a,b,x[i+11],14,0x265e5a51); b = gg(b,c,d,a,x[i+0],20,0xe9b6c7aa);
+    a = gg(a,b,c,d,x[i+5],5,0xd62f105d); d = gg(d,a,b,c,x[i+10],9,0x02441453); c = gg(c,d,a,b,x[i+15],14,0xd8a1e681); b = gg(b,c,d,a,x[i+4],20,0xe7d3fbc8);
+    a = gg(a,b,c,d,x[i+9],5,0x21e1cde6); d = gg(d,a,b,c,x[i+14],9,0xc33707d6); c = gg(c,d,a,b,x[i+3],14,0xf4d50d87); b = gg(b,c,d,a,x[i+8],20,0x455a14ed);
+    a = gg(a,b,c,d,x[i+13],5,0xa9e3e905); d = gg(d,a,b,c,x[i+2],9,0xfcefa3f8); c = gg(c,d,a,b,x[i+7],14,0x676f02d9); b = gg(b,c,d,a,x[i+12],20,0x8d2a4c8a);
+    a = hh(a,b,c,d,x[i+5],4,0xfffa3942); d = hh(d,a,b,c,x[i+8],11,0x8771f681); c = hh(c,d,a,b,x[i+11],16,0x6d9d6122); b = hh(b,c,d,a,x[i+14],23,0xfde5380c);
+    a = hh(a,b,c,d,x[i+1],4,0xa4beea44); d = hh(d,a,b,c,x[i+4],11,0x4bdecfa9); c = hh(c,d,a,b,x[i+7],16,0xf6bb4b60); b = hh(b,c,d,a,x[i+10],23,0xbebfbc70);
+    a = hh(a,b,c,d,x[i+13],4,0x289b7ec6); d = hh(d,a,b,c,x[i+0],11,0xeaa127fa); c = hh(c,d,a,b,x[i+3],16,0xd4ef3085); b = hh(b,c,d,a,x[i+6],23,0x04881d05);
+    a = hh(a,b,c,d,x[i+9],4,0xd9d4d039); d = hh(d,a,b,c,x[i+12],11,0xe6db99e5); c = hh(c,d,a,b,x[i+15],16,0x1fa27cf8); b = hh(b,c,d,a,x[i+2],23,0xc4ac5665);
+    a = ii(a,b,c,d,x[i+0],6,0xf4292244); d = ii(d,a,b,c,x[i+7],10,0x432aff97); c = ii(c,d,a,b,x[i+14],15,0xab9423a7); b = ii(b,c,d,a,x[i+5],21,0xfc93a039);
+    a = ii(a,b,c,d,x[i+12],6,0x655b59c3); d = ii(d,a,b,c,x[i+3],10,0x8f0ccc92); c = ii(c,d,a,b,x[i+10],15,0xffeff47d); b = ii(b,c,d,a,x[i+1],21,0x85845dd1);
+    a = ii(a,b,c,d,x[i+8],6,0x6fa87e4f); d = ii(d,a,b,c,x[i+15],10,0xfe2ce6e0); c = ii(c,d,a,b,x[i+6],15,0xa3014314); b = ii(b,c,d,a,x[i+13],21,0x4e0811a1);
+    a = ii(a,b,c,d,x[i+4],6,0xf7537e82); d = ii(d,a,b,c,x[i+11],10,0xbd3af235); c = ii(c,d,a,b,x[i+2],15,0x2ad7d2bb); b = ii(b,c,d,a,x[i+9],21,0xeb86d391);
+    a = safeAdd(a, oa); b = safeAdd(b, ob); c = safeAdd(c, oc); d = safeAdd(d, od);
+  }
+  return hex(a) + hex(b) + hex(c) + hex(d);
+}
+var WBI_CACHE_KEY = 'bilibili.wbi.keys';
+var WBI_MIXIN_KEY_ENC_TAB = [
+  46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35,
+  27, 43, 5, 49, 33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41,
+  13, 37, 48, 7, 16, 24, 55, 40, 61, 26, 17, 0, 1, 60, 51, 30,
+  4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11
+];
+
+function wbiKeyPart(url) {
+  var value = String(url || '').split('?')[0];
+  var slash = value.lastIndexOf('/');
+  var name = slash >= 0 ? value.slice(slash + 1) : value;
+  var dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(0, dot) : name;
+}
+
+function wbiMixinKey(imgKey, subKey) {
+  var raw = String(imgKey || '') + String(subKey || ''), out = '';
+  for (var i = 0; i < WBI_MIXIN_KEY_ENC_TAB.length; i++) {
+    if (raw[WBI_MIXIN_KEY_ENC_TAB[i]]) out += raw[WBI_MIXIN_KEY_ENC_TAB[i]];
+  }
+  return out.slice(0, 32);
+}
+
+async function apiGetPayload(path, ctx, cookie) {
+  var response;
+  try {
+    var requestCookie = cookie || await effectiveCookie(ctx);
+    response = await flux.fetch({
+      method: 'GET',
+      url: API_BASE + path,
+      headers: requestHeaders(requestCookie, ctx),
+    });
+  } catch (e) {
+    throw new Error('Bilibili 接口请求失败: ' + String(e));
+  }
+  if (!response || response.status < 200 || response.status >= 300) {
+    throw new Error('Bilibili 接口 HTTP 状态异常: ' + String(response && response.status));
+  }
+  var payload;
+  try { payload = JSON.parse(response.body || ''); } catch (e) {
+    throw new Error('Bilibili 接口返回非法 JSON: ' + String(e));
+  }
+  await rememberResponseBfeId(response);
+  if (/\/x\/web-interface\/nav(?:\?|$)/.test(path)) logAuthDiagnostics('nav', requestCookie, payload);
+  return payload;
+}
+
+async function getWbiKeys(ctx, cookie, forceRefresh) {
+  if (!forceRefresh) {
+    try {
+      var cached = JSON.parse(String(await flux.storage.get(WBI_CACHE_KEY) || 'null'));
+      if (cached && cached.mixinKey && Number(cached.expiresAt) > Date.now()) return cached.mixinKey;
+    } catch (e) {}
+  }
+  var payload = await apiGetPayload('/x/web-interface/nav', ctx, cookie);
+  var image = payload && payload.data && payload.data.wbi_img;
+  var mixinKey = wbiMixinKey(wbiKeyPart(image && image.img_url), wbiKeyPart(image && image.sub_url));
+  if (!mixinKey) throw new Error('Bilibili WBI key 获取失败');
+  try {
+    await flux.storage.set(WBI_CACHE_KEY, JSON.stringify({ mixinKey: mixinKey, expiresAt: Date.now() + 12 * 60 * 60 * 1000 }));
+  } catch (e) {}
+  return mixinKey;
+}
+
+function wbiEncode(value) {
+  return encodeURIComponent(String(value == null ? '' : value)).replace(/[!'()*]/g, '');
+}
+
+async function signedWbiPath(path, params, ctx, cookie, forceRefresh) {
+  var mixinKey = await getWbiKeys(ctx, cookie, forceRefresh);
+  var all = {};
+  var keys = Object.keys(params || {});
+  for (var i = 0; i < keys.length; i++) all[keys[i]] = params[keys[i]];
+  all.wts = Math.floor(Date.now() / 1000);
+  keys = Object.keys(all).sort();
+  var query = [];
+  for (var j = 0; j < keys.length; j++) query.push(wbiEncode(keys[j]) + '=' + wbiEncode(all[keys[j]]));
+  var queryString = query.join('&');
+  return path + '?' + queryString + '&w_rid=' + md5(queryString + mixinKey);
+}
+
+async function apiGetWbi(path, params, ctx, cookie) {
+  var lastError = null;
+  for (var attempt = 0; attempt < 2; attempt++) {
+    try {
+      return await apiGet(await signedWbiPath(path, params, ctx, cookie, attempt > 0), ctx, cookie);
+    } catch (e) {
+      lastError = e;
+      if (attempt === 0 && /code=(-352|-799)/.test(String(e))) {
+        try { await flux.storage.set(WBI_CACHE_KEY, ''); } catch (ignored) {}
+        // Resolver scripts have no global timer; retry the refreshed signature immediately.
+        continue;
+      }
+      break;
+    }
+  }
+  throw lastError || new Error('Bilibili WBI 接口请求失败');
+}
+function htmlAttribute(tag, name) {
+  var match = new RegExp('\\s' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\')', 'i').exec(tag);
+  return match ? String(match[1] == null ? match[2] : match[1]).replace(/&amp;/gi, '&') : '';
+}
+
+async function expandBilibiliShortUrl(ctx) {
+  var url = String(ctx.url || '').trim();
+  if (!/^https?:\/\/(?:b23\.tv|bili2233\.cn)\/[a-z0-9]+\/?(?:[?#]|$)/i.test(url)) return ctx;
+  // 宿主自动跟随重定向但不暴露最终 URL；从落地页读取规范链接。
+  // 不转发任务 Cookie、自定义头或认证引用到短链服务。
+  var response = await flux.fetch({
+    method: 'GET',
+    url: url,
+    headers: { 'User-Agent': USER_AGENT, Referer: 'https://www.bilibili.com/' },
+  });
+  if (!response || response.status < 200 || response.status >= 300) {
+    throw new Error('Bilibili 短链展开失败，HTTP 状态: ' + String(response && response.status));
+  }
+  if (response.truncated) throw new Error('Bilibili 短链页面被截断，无法可靠识别目标');
+  var html = String(response.body || '');
+  var tags = html.match(/<(?:link|meta)\b[^>]*>/gi) || [];
+  var target = '';
+  for (var i = 0; i < tags.length; i++) {
+    if (htmlAttribute(tags[i], 'rel').toLowerCase() === 'canonical') {
+      target = htmlAttribute(tags[i], 'href');
+      break;
+    }
+    if (htmlAttribute(tags[i], 'property').toLowerCase() === 'og:url') target = htmlAttribute(tags[i], 'content');
+  }
+  if (!/^https?:\/\/(?:(?:www|m)\.)?bilibili\.com\/(?:video\/(?:BV[0-9a-z]+|av\d+)\/?(?:[?#]|$)|bangumi\/(?:play|media)(?:\/|\?))/i.test(target) &&
+      !/^https?:\/\/space\.bilibili\.com\/\d+\/?(?:[?#]|$)/i.test(target)) {
+    throw new Error('Bilibili 短链未返回支持的页面，可能触发验证码或链接目标不受支持');
+  }
+  if (/\/video\//i.test(target) && /__INITIAL_STATE__\s*=/.test(html)) {
+    var stateMatch = /__INITIAL_STATE__\s*=\s*(\{[\s\S]*?\})\s*;\s*(?:\(function|<\/script>)/.exec(html);
+    if (!stateMatch) throw new Error('Bilibili 短链页面状态无法识别，无法保留分 P');
+    var state = JSON.parse(stateMatch[1]);
+    if (state.p != null) {
+      var page = Number(state.p);
+      if (!Number.isInteger(page) || page < 1) throw new Error('Bilibili 短链页面分 P 非法');
+      target = target.split('#')[0].replace(/([?&])p=[^&]*/i, '$1p=' + page);
+      if (!/[?&]p=/.test(target)) target += (target.indexOf('?') < 0 ? '?' : '&') + 'p=' + page;
+    }
+  }
+  return Object.assign({}, ctx, { url: target });
+}
+
+function firstMatch(url, pattern) {
+  var match = pattern.exec(url || '');
+  return match && match[1] ? match[1] : '';
+}
+
+async function seasonIdFromUrl(url, ctx, cookie) {
+  var seasonId = firstMatch(url, /\/bangumi\/play\/ss(\d+)/i);
+  if (seasonId) return seasonId;
+
+  var mediaId = firstMatch(url, /\/bangumi\/media\/md(\d+)/i);
+  if (mediaId) {
+    var media = await apiGet('/pgc/review/user?media_id=' + encodeURIComponent(mediaId), ctx, cookie);
+    var mediaInfo = media.media || {};
+    if (mediaInfo.season_id) return String(mediaInfo.season_id);
+  }
+
+  var episodeId = firstMatch(url, /\/bangumi\/play\/ep(\d+)/i);
+  if (episodeId) {
+    var episodeResult = await apiGet(
+      '/pgc/view/web/season?ep_id=' + encodeURIComponent(episodeId),
+      ctx,
+      cookie
+    );
+    if (episodeResult.season_id) return String(episodeResult.season_id);
+  }
+
+  var query = /[?&]season_id=(\d+)/i.exec(url || '');
+  return query && query[1] ? query[1] : '';
+}
+
+function episodeLabel(ep) {
+  var index = ep.index_show || ep.title || ('EP' + String(ep.id || ''));
+  var longTitle = ep.long_title || '';
+  return longTitle && longTitle !== index ? index + ' ' + longTitle : index;
+}
+
+function isBangumiExtraEpisode(ep) {
+  var sectionType = Number(ep && (ep.section_type || ep.sectionType) || 0);
+  if (sectionType > 0) return true;
+  var badgeInfo = ep && (ep.badge_info || ep.badgeInfo);
+  var text = [
+    ep && (ep.badge || ''),
+    badgeInfo && (badgeInfo.text || ''),
+    ep && (ep.show_title || ep.showTitle || ''),
+    ep && (ep.share_copy || ep.shareCopy || '')
+  ].join(' ');
+  return /预告|花絮|番外|特别篇|PV|preview|trailer/i.test(text);
+}
+
+function filterBangumiEpisodes(episodes, includeExtras) {
+  if (includeExtras || !Array.isArray(episodes)) return episodes || [];
+  var filtered = [];
+  for (var i = 0; i < episodes.length; i++) {
+    if (!isBangumiExtraEpisode(episodes[i])) filtered.push(episodes[i]);
+  }
+  return filtered;
+}
+
+function episodePageUrl(epId, ep) {
+  var id = String(epId || (ep && (ep.id || ep.ep_id)) || '');
+  return id ? 'https://www.bilibili.com/bangumi/play/ep' + encodeURIComponent(id) : '';
+}
+
+function disambiguateEpisodeNames(episodes) {
+  var counts = {};
+  for (var i = 0; i < episodes.length; i++) {
+    var name = String(episodes[i].baseName || '');
+    counts[name] = (counts[name] || 0) + 1;
+  }
+  for (var j = 0; j < episodes.length; j++) {
+    var episode = episodes[j];
+    if (counts[episode.baseName] <= 1) continue;
+    var suffix = String(episode.showTitle || '').trim();
+    if (!suffix || suffix === episode.baseName) suffix = 'ep' + String(episode.id);
+    episode.baseName = sanitizeFileName(episode.baseName + ' [' + suffix + ']');
+  }
+  return episodes;
+}
+
+function episodeDisplayName(result, epId, fallbackEpisode) {
+  var groups = [];
+  if (result && Array.isArray(result.episodes)) groups.push(result.episodes);
+  if (result && Array.isArray(result.section)) {
+    for (var si = 0; si < result.section.length; si++) {
+      var section = result.section[si];
+      if (section && Array.isArray(section.episodes)) groups.push(section.episodes);
+    }
+  }
+  var entries = [];
+  var seen = {};
+  for (var gi = 0; gi < groups.length; gi++) {
+    for (var ei = 0; ei < groups[gi].length; ei++) {
+      var episode = groups[gi][ei] || {};
+      var id = String(episode.id || episode.ep_id || '');
+      if (!id || seen[id]) continue;
+      seen[id] = true;
+      entries.push({
+        id: id,
+        baseName: sanitizeFileName(episodeLabel(episode)),
+        showTitle: episode.show_title || episode.showTitle || '',
+      });
+    }
+  }
+  disambiguateEpisodeNames(entries);
+  for (var i = 0; i < entries.length; i++) {
+    if (entries[i].id === String(epId)) return entries[i].baseName;
+  }
+  return sanitizeFileName(episodeLabel(fallbackEpisode || { id: epId }));
+}
+
+function episodePubDate(ep) {
+  var raw = ep && (ep.pub_time || ep.pubTime || ep.publish_time || 0);
+  var numeric = Number(raw);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    if (numeric >= 100000000000) numeric /= 1000;
+    return Math.floor(numeric);
+  }
+  var parsed = Date.parse(String(raw || ''));
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed / 1000) : 0;
+}
+
+function episodePlayUrl(epId, qualityId) {
+  var qn = Number(qualityId) || 127;
+  return '/pgc/player/web/playurl?ep_id=' + encodeURIComponent(epId) +
+    '&qn=' + encodeURIComponent(qn) +
+    '&fnval=4048&fourk=1&fnver=0&otype=json&platform=web';
+}
+
+function playerPlayUrl(episode, qualityId) {
+  // The generic /x/player/playurl endpoint now commonly returns 412 for
+  // bangumi episodes. Use the PGC endpoint, which returns the episode DASH
+  // representations and quality metadata without the generic player session.
+  var epId = String(episode && (episode.id || episode.ep_id) || '');
+  return episodePlayUrl(epId, qualityId);
+}
+
+function subscriptionPlayUrl(epId, qualityId) {
+  var qn = Number(qualityId) || 127;
+  return '/pgc/player/web/playurl?ep_id=' + encodeURIComponent(epId) +
+    '&qn=' + encodeURIComponent(qn) +
+    '&fnval=0&fourk=1&fnver=0&otype=json&platform=web';
+}
+function qualityHeight(qualityId) {
+  return QUALITY_HEIGHT_BY_ID[Number(qualityId) || 0] || 0;
+}
+
+function supportFormat(play, qualityId) {
+  var formats = Array.isArray(play.support_formats) ? play.support_formats : [];
+  for (var i = 0; i < formats.length; i++) {
+    if (Number(formats[i].quality) === Number(qualityId)) return formats[i];
+  }
+  return null;
+}
+
+function qualityLabelFromPlay(play, qualityId, height) {
+  var label = height ? height + 'p' : 'quality-' + String(qualityId || 'unknown');
+  var format = supportFormat(play, qualityId);
+  var description = format && (format.new_description || format.description || '');
+  description = String(description || '').replace(/^\s*\d{3,4}P[+＋]?\s*/i, '').trim();
+  return description ? label + ' ' + description : label;
+}
+
+function variantQualityKey(variant) {
+  var qualityId = Number(variant.qualityId) || 0;
+  if (qualityId) return String(qualityId);
+  var height = Number(variant.height) || 0;
+  return height ? 'h' + String(height) : '';
+}
+
+function variantQualityTag(variant) {
+  var height = Number(variant.height) || 0;
+  var base = height ? height + 'p' : 'unknown-quality';
+  var label = String(variant.label || '');
+  var suffix = height ? label.replace(new RegExp('^' + height + 'p\\s*', 'i'), '').trim() : '';
+  if (suffix) base += '-' + suffix;
+  return sanitizeFileName(base).replace(/\s+/g, '-');
+}
+
+function chooseVariantIndex(variants, qualityKey) {
+  if (!qualityKey) return -1;
+  if (qualityKey.indexOf('h') === 0) {
+    var targetHeight = Number(qualityKey.slice(1)) || 0;
+    for (var hi = 0; hi < variants.length; hi++) {
+      if (Number(variants[hi].height) === targetHeight) return hi;
+    }
+    return -1;
+  }
+  var targetId = Number(qualityKey) || 0;
+  for (var qi = 0; qi < variants.length; qi++) {
+    if (Number(variants[qi].qualityId) === targetId) return qi;
+  }
+  return -1;
+}
+
+async function collectEpisodes(result, includeExtras, ctx, cookie, quality) {
+  var groups = [];
+  if (Array.isArray(result.episodes)) groups.push({ title: '正片', episodes: filterBangumiEpisodes(result.episodes, includeExtras) });
+  if (includeExtras && Array.isArray(result.section)) {
+    for (var i = 0; i < result.section.length; i++) {
+      var section = result.section[i];
+      if (section && Array.isArray(section.episodes)) groups.push({ title: section.title || '番外', episodes: section.episodes });
+    }
+  }
+  var seen = {};
+  var episodes = [];
+  for (var gi = 0; gi < groups.length; gi++) {
+    var group = groups[gi];
+    for (var ei = 0; ei < group.episodes.length; ei++) {
+      var ep = group.episodes[ei] || {};
+      var id = String(ep.id || ep.ep_id || '');
+      if (!id || seen[id]) continue;
+      seen[id] = true;
+      episodes.push({
+        epId: id,
+        aid: ep.aid || '',
+        cover: ep.cover || result.cover,
+        id: id,
+        bvid: ep.bvid || ep.bv_id || '',
+        cid: ep.cid || '',
+        baseName: sanitizeFileName(episodeLabel(ep)),
+        showTitle: ep.show_title || ep.showTitle || '',
+        path: group.title === '正片' ? '' : sanitizePath(group.title),
+      });
+      if (episodes.length >= MAX_EPISODES) break;
+    }
+    if (episodes.length >= MAX_EPISODES) break;
+  }
+  disambiguateEpisodeNames(episodes);
+  var mediaParts = episodes.map(function(episode) {
+    return Object.assign({}, episode, { id: 'ep:' + episode.id, title: episode.baseName });
+  });
+  var kinds = ctx ? selectedBiliResources() : [];
+  if (ctx && quality === 'audio') {
+    var audioItems = episodes.map(function(episode) {
+      return { id: 'ep:' + episode.id, name: episode.baseName + ' [audio]', path: episode.path, size: 0, kind: 'file' };
+    });
+    return fitManifestItems(await withBiliResourceItems(ctx, audioItems, mediaParts, cookie, kinds));
+  }
+  if (!episodes.length || !ctx) return fitManifestItems(episodes.map(function(episode) {
+    return { id: 'ep:' + episode.id, name: episode.baseName, path: episode.path, size: 0, kind: 'file' };
+  }));
+
+  // Resolve every episode. The current NetPulse manifest UI does not expose
+  // nested item.variants, so quality choices must remain flat manifest items.
+  // Keeping the full episode range here fixes the old first-50-only behavior.
+  var hintLimit = episodes.length;
+  var qualityVariants = new Array(hintLimit);
+  var highestQualityOnly = Boolean(setting('highestQualityOnly', false));
+  var nextIndex = 0;
+  var failed = 0;
+  async function worker() {
+    while (true) {
+      var index = nextIndex++;
+      if (index >= hintLimit) return;
+      try {
+        var play = await apiGet(playerPlayUrl(episodes[index]), ctx, cookie);
+        var variants = buildManifestVariantsFromPlay(play, 'quality');
+        qualityVariants[index] = selectListedQualityVariants(variants, highestQualityOnly);
+        if (!qualityVariants[index].length) failed++;
+      } catch (e) {
+        qualityVariants[index] = [];
+        failed++;
+      }
+    }
+  }
+  var workers = Math.min(6, hintLimit);
+  var jobs = [];
+  for (var wi = 0; wi < workers; wi++) jobs.push(worker());
+  await Promise.all(jobs);
+  if (failed) pluginLog('warn', '[bilibili] manifest quality enumeration failures; unresolved episodes remain selectable', { failed: failed, total: episodes.length });
+
+  var items = buildEpisodeItems(episodes, qualityVariants);
+  if (items.length > MAX_EPISODES) {
+    // The host rejects a flat manifest above MAX_EPISODES. Keep the all-quality
+    // mode for shorter seasons, but make long seasons resolvable by falling
+    // back to one real, downloadable variant per episode.
+    var originalCount = items.length;
+    var bestQualityVariants = qualityVariants.map(function(variants) {
+      return selectListedQualityVariants(variants || [], true);
+    });
+    items = buildEpisodeItems(episodes, bestQualityVariants);
+    pluginLog('warn', '[bilibili] manifest quality choices reduced to host limit', { before: originalCount, after: items.length, limit: MAX_EPISODES });
+  }
+  if (!kinds.length) return items;
+  // Optional attachments may consume the remaining manifest budget. Keep one
+  // playable video per episode before rejecting an overfull selection.
+  var attachments = await withBiliResourceItems(ctx, [], mediaParts, cookie, kinds);
+  if (items.length + attachments.length > MAX_EPISODES) {
+    items = buildEpisodeItems(episodes, qualityVariants.map(function(variants) {
+      return selectListedQualityVariants(variants || [], true);
+    }));
+  }
+  if (items.length + attachments.length > MAX_EPISODES) {
+    throw new Error('番剧和附加资源超过 NetPulse 单次 1000 项上限；请减少附加资源类型');
+  }
+  return fitManifestItems(items.concat(attachments));
+}
+
+async function resolveManifest(ctx) {
+  var cookie = await effectiveCookie(ctx);
+  var seasonId = await seasonIdFromUrl(ctx.url, ctx, cookie);
+  if (!seasonId) {
+    throw new Error('无法从 Bilibili 番剧链接识别 season_id 或 media_id');
+  }
+
+  var result = await apiGet(
+    '/pgc/view/web/season?season_id=' + encodeURIComponent(seasonId),
+    ctx,
+    cookie
+  );
+  var title = sanitizeFileName(result.title || result.season_title || ('Bilibili ' + seasonId));
+  var items = await collectEpisodes(result, Boolean(setting('includeExtras', false)), ctx, cookie, String(setting('quality', 'best')));
+  if (!items.length) throw new Error('Bilibili 未返回可下载分集');
+
+  return { manifest: { name: title, items: items, archiveMetadata: { platform: 'bilibili', mediaKind: 'series', seriesId: String(result.season_id || seasonId), seriesTitle: String(result.title || result.season_title || title) } } };
+}
+
+async function resolveEpisode(ctx) {
+  var match = /^ep:(\d+)(?:@q:(\d+|h\d+))?$/.exec(String(ctx.resolverItem || ''));
+  if (!match) throw new Error('Bilibili 分集标识非法: ' + String(ctx.resolverItem || ''));
+  var epId = match[1];
+  var qualityKey = match[2] || '';
+  var cookie = await effectiveCookie(ctx);
+  var season = await apiGet('/pgc/view/web/season?ep_id=' + encodeURIComponent(epId), ctx, cookie);
+  var episode = findEpisode(season, epId);
+  var archiveMetadata = {
+    platform: 'bilibili',
+    mediaKind: 'series',
+    seriesId: String(season.season_id || season.media_id || ''),
+    seriesTitle: String(season.title || season.season_title || ''),
+  };
+  // 清单项带有具体画质码时，下载阶段直接请求该 qn；
+  // qn=127 只用于列出可选画质，不能保证每次都返回同一条资源。
+  var requestedQualityId = /^\d+$/.test(qualityKey) ? Number(qualityKey) : 0;
+  var play = await apiGet(playerPlayUrl({ id: epId }, requestedQualityId), ctx, cookie);
+  if (play.code != null && Number(play.code) !== 0) {
+    throw new Error('Bilibili 播放接口错误 code=' + String(play.code));
+  }
+  // 清单中的 name 就是最终落盘文件名；番剧名由宿主 manifest 组名承载，
+  // 这里不要再重复拼一遍，避免预览名称和下载后的文件名不一致。
+  var title = episode ? episodeDisplayName(season, epId, episode) : sanitizeFileName('EP' + epId);
+  return resolvePlayResult(play, title, qualityKey, requestHeaders(cookie, ctx), archiveMetadata);
+}
+
+function findEpisode(result, epId) {
+  var groups = [];
+  if (Array.isArray(result.episodes)) groups.push(result.episodes);
+  if (Array.isArray(result.section)) {
+    for (var i = 0; i < result.section.length; i++) {
+      if (result.section[i] && Array.isArray(result.section[i].episodes)) {
+        groups.push(result.section[i].episodes);
+      }
+    }
+  }
+  for (var gi = 0; gi < groups.length; gi++) {
+    for (var ei = 0; ei < groups[gi].length; ei++) {
+      var episode = groups[gi][ei];
+      if (String(episode.id || episode.ep_id || '') === String(epId)) return episode;
+    }
+  }
+  return null;
+}
+
+function streamUrl(stream) {
+  if (!stream || typeof stream !== 'object') return '';
+  var primary = stream.base_url || stream.baseUrl || stream.url || '';
+  if (primary) return String(primary);
+  var backups = stream.backup_url || stream.backupUrl;
+  if (Array.isArray(backups) && backups.length && backups[0]) return String(backups[0]);
+  return '';
+}
+
+function streamBackups(stream) {
+  var primary = streamUrl(stream);
+  var backups = stream && (stream.backup_url || stream.backupUrl);
+  if (!Array.isArray(backups)) return [];
+  var distinct = new Set([primary]);
+  var output = [];
+  for (var url of backups) {
+    if (typeof url !== 'string' || !/^https:\/\/[^\/\s@?#]+(?:[/?#]|$)/i.test(url) || distinct.has(url)) continue;
+    distinct.add(url);
+    output.push(url);
+    if (output.length === 4) break;
+  }
+  return output;
+}
+
+function audioUrl(stream) {
+  return streamUrl(stream);
+}
+
+function streamSize(stream) {
+  var value = Number(stream && (stream.size || stream.filesize || stream.filesize_approx)) || 0;
+  return value > 0 ? value : 0;
+}
+
+function mediaMime(stream) {
+  return String(stream && (stream.mime_type || stream.mimeType) || '').toLowerCase().split(';')[0].trim();
+}
+
+function isMp4CompatibleAudio(track) {
+  var mime = mediaMime(track);
+  return !mime || mime === 'audio/mp4';
+}
+
+function pickAudioTrack(audios) {
+  var best = null;
+  var score = -1;
+  var hasUsableUrl = false;
+  for (var i = 0; i < audios.length; i++) {
+    var track = audios[i];
+    if (!track || !streamUrl(track)) continue;
+    hasUsableUrl = true;
+    if (!isMp4CompatibleAudio(track)) continue;
+    var current = Number(track.bandwidth) || Number(track.id) || 0;
+    if (current > score) {
+      score = current;
+      best = track;
+    }
+  }
+  if (!best && hasUsableUrl) throw new Error('Bilibili 返回了不兼容 MP4/M4A 封装的音轨');
+  return best;
+}
+
+var AUDIO_LEVELS = [30216, 30232, 30280, 30250, 30251];
+
+function dashAudioTrack(dash) {
+  var regular = Array.isArray(dash.audio) ? dash.audio : [];
+  var preferred = String(setting('audioQuality', 'auto'));
+  if (preferred === 'auto') return pickAudioTrack(regular);
+  var target = AUDIO_LEVELS.indexOf(Number(preferred));
+  var tracks = regular.slice();
+  if (dash.dolby && Array.isArray(dash.dolby.audio)) {
+    for (var dolby of dash.dolby.audio) {
+      if (dolby) tracks.push(Object.assign({}, dolby, { id: 30250 }));
+    }
+  }
+  if (dash.flac && dash.flac.audio) tracks.push(Object.assign({}, dash.flac.audio, { id: 30251 }));
+  var best = null, bestDistance = Infinity, bestBandwidth = -1;
+  for (var track of tracks) {
+    if (!track || !streamUrl(track)) continue;
+    var rank = AUDIO_LEVELS.indexOf(Number(track.id));
+    if (!isMp4CompatibleAudio(track) && !(rank === 4 && mediaMime(track) === 'audio/flac')) continue;
+    var distance = rank < 0 ? AUDIO_LEVELS.length * 2 :
+      rank <= target ? target - rank : AUDIO_LEVELS.length + rank - target;
+    var bandwidth = Number(track.bandwidth) || 0;
+    if (distance < bestDistance || (distance === bestDistance && bandwidth > bestBandwidth)) {
+      best = track;
+      bestDistance = distance;
+      bestBandwidth = bandwidth;
+    }
+  }
+  return best || pickAudioTrack(regular);
+}
+
+function audioFileExtension(audio) {
+  if (Number(audio.id) === 30251) return mediaMime(audio) === 'audio/flac' ? 'flac' : 'mp4';
+  return 'm4a';
+}
+
+function audioOnlyVariant(audio, title) {
+  var extension = audioFileExtension(audio);
+  return {
+    label: '仅音频 (' + extension.toUpperCase() + ')',
+    url: audioUrl(audio),
+    audioUrl: '',
+    backupUrls: streamBackups(audio),
+    fileName: title + ' [audio].' + extension,
+    totalBytes: streamSize(audio),
+    bandwidth: Number(audio.bandwidth) || 0,
+    width: 0,
+    height: 0,
+    container: extension,
+  };
+}
+
+function videoContainer(video) {
+  var mime = mediaMime(video);
+  if (!mime || mime === 'video/mp4') return 'mp4';
+  throw new Error('Bilibili 返回了非 MP4 视频流，当前下载器不能在不转码的情况下封装：' + mime);
+}
+
+
+function videoHeight(video) {
+  var height = Number(video.height) || Number(video.height_cm) || 0;
+  if (height) return height;
+  var qualityId = Number(video.id) || Number(video.quality) || 0;
+  return QUALITY_HEIGHT_BY_ID[qualityId] || 0;
+}
+
+function videoQualityTag(video, height) {
+  if (!height) return 'unknown-quality';
+  var width = Number(video.width) || 0;
+  return width ? height + 'p-' + width + 'x' + height : height + 'p';
+}
+
+function videoCodec(video) {
+  var codecs = String(video && (video.codecs || video.codecs_name) || '').toLowerCase();
+  var id = Number(video && video.codecid);
+  if (/avc1|avc3|h264|avc/.test(codecs) || id === 7) return 'avc';
+  if (/hev1|hvc1|hevc|h265/.test(codecs) || id === 12) return 'hevc';
+  if (/av01|av1/.test(codecs) || id === 13) return 'av1';
+  return '';
+}
+
+function videoCodecScore(video, preferred) {
+  var codec = videoCodec(video);
+  if (codec && codec === preferred) return 4;
+  if (codec === 'avc') return 3;
+  if (codec === 'hevc') return 2;
+  if (codec === 'av1') return 1;
+  return 0;
+}
+
+function videoQualityLabel(video, height, play) {
+  if (!height) return '未知画质';
+  var qualityId = Number(video.id) || Number(video.quality) || 0;
+  var label = qualityLabelFromPlay(play || {}, qualityId, height);
+  // 文件名只保留 Bilibili 画质名称，不把分辨率和编码信息拼进去。
+  // 没有 support_formats 描述时，用质量码保证同分辨率条目仍可区分。
+  if (qualityId && label === height + 'p') label += ' [qn' + qualityId + ']';
+  return label;
+}
+
+function buildDashVariants(videos, audio, title, play, preferredCodec) {
+  var candidates = [];
+  var seen = {};
+  for (var i = 0; i < videos.length; i++) {
+    var video = videos[i];
+    var url = streamUrl(video);
+    var height = videoHeight(video);
+    var qualityId = Number(video.id) || Number(video.quality) || 0;
+    var key = qualityId ? 'q' + qualityId : 'h' + height;
+    if (!url || !height) continue;
+    var previousIndex = seen[key];
+    if (previousIndex != null) {
+      var previous = candidates[previousIndex];
+      var currentScore = videoCodecScore(video, preferredCodec);
+      var previousScore = videoCodecScore(previous.video, preferredCodec);
+      if (currentScore > previousScore ||
+          (currentScore === previousScore &&
+            (Number(video.bandwidth) || 0) > (Number(previous.video.bandwidth) || 0))) {
+        candidates[previousIndex] = { video: video, height: height };
+      }
+      continue;
+    }
+    seen[key] = candidates.length;
+    candidates.push({ video: video, height: height });
+  }
+  candidates.sort(function(a, b) {
+    if (b.height !== a.height) return b.height - a.height;
+    return (Number(b.video.bandwidth) || 0) - (Number(a.video.bandwidth) || 0);
+  });
+
+  var variants = [];
+  for (var ci = 0; ci < candidates.length && variants.length < MAX_VARIANTS; ci++) {
+    var item = candidates[ci];
+    var video = item.video;
+    var label = videoQualityLabel(video, item.height, play);
+    var tag = variantQualityTag({ label: label, qualityId: Number(video.id) || Number(video.quality) || 0, height: item.height });
+    var container = videoContainer(video);
+    var variant = {
+      label: label,
+      url: streamUrl(video),
+      backupUrls: streamBackups(video),
+      audioUrl: '',
+      fileName: title + ' [' + tag + '].' + container,
+      qualityId: Number(video.id) || Number(video.quality) || 0,
+      totalBytes: streamSize(video) + streamSize(audio),
+      bandwidth: Number(video.bandwidth) || 0,
+      width: Number(video.width) || 0,
+      height: item.height,
+      container: container,
+    };
+    if (audio) {
+      variant.audioUrl = audioUrl(audio);
+      variant.audioBackupUrls = streamBackups(audio);
+    }
+    variants.push(variant);
+  }
+  if (audio && variants.length < MAX_VARIANTS) variants.push(audioOnlyVariant(audio, title));
+  return variants;
+}
+
+function buildDurlVariants(play, title) {
+  var entries = [];
+  if (Array.isArray(play.durls) && play.durls.length) {
+    entries = play.durls;
+  } else if (Array.isArray(play.durl)) {
+    entries = [{ quality: play.quality, durl: play.durl }];
+  } else if (play.durl) {
+    entries = [{ quality: play.quality, durl: [play.durl] }];
+  }
+
+  var candidates = [];
+  var seen = {};
+  for (var i = 0; i < entries.length; i++) {
+    var source = entries[i] || {};
+    var parts = Array.isArray(source.durl) ? source.durl : [];
+    if (parts.length > 1) throw new Error('Bilibili 返回分段 durl，插件尚不支持完整分段合并；拒绝只下载首段');
+    var part = parts[0] || source;
+    var url = String(part.url || '');
+    var qualityId = Number(source.quality || part.quality || play.quality || 0);
+    var height = qualityHeight(qualityId);
+    var key = String(qualityId || height || url);
+    if (!url || seen[key]) continue;
+    seen[key] = true;
+    var durationMs = Number(play.timelength) || 0;
+    var bandwidth = durationMs > 0 && Number(part.size) > 0
+      ? Math.round(Number(part.size) * 8 * 1000 / durationMs)
+      : 0;
+    candidates.push({
+      part: part,
+      qualityId: qualityId,
+      height: height,
+      bandwidth: bandwidth,
+    });
+  }
+  candidates.sort(function(a, b) {
+    if (b.height !== a.height) return b.height - a.height;
+    return b.qualityId - a.qualityId;
+  });
+
+  var variants = [];
+  var format = String(play.format || 'mp4').toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (!format) format = 'mp4';
+  for (var ci = 0; ci < candidates.length && variants.length < MAX_VARIANTS; ci++) {
+    var item = candidates[ci];
+    var label = qualityLabelFromPlay(play, item.qualityId, item.height);
+    var tag = variantQualityTag({ label: label, qualityId: item.qualityId, height: item.height });
+    variants.push({
+      label: label,
+      qualityId: item.qualityId,
+      url: String(item.part.url),
+      backupUrls: streamBackups(item.part),
+      fileName: title + ' [' + tag + '].' + format,
+      totalBytes: Number(item.part.size) > 0 ? Number(item.part.size) : 0,
+      bandwidth: item.bandwidth,
+      width: 0,
+      height: item.height,
+      container: format,
+    });
+  }
+  return variants;
+}
+
+function buildVariantsFromPlay(play, title) {
+  var dash = play && play.dash ? play.dash : {};
+  var videos = Array.isArray(dash.video) ? dash.video : [];
+  var dashVariants = buildDashVariants(videos, dashAudioTrack(dash), title, play, String(setting('videoCodec', 'auto')));
+  return dashVariants.length ? dashVariants : buildDurlVariants(play || {}, title);
+}
+
+function mediaResolveResult(variant, headers, archiveMetadata) {
+  return {
+    url: variant.url, audioUrl: variant.audioUrl || '', fileName: variant.fileName,
+    totalBytes: variant.totalBytes, backupUrls: variant.backupUrls,
+    audioBackupUrls: variant.audioBackupUrls, extraHeaders: headers,
+    ephemeral: true, rangeSupported: true, archiveMetadata: archiveMetadata,
+  };
+}
+
+function resolvePlayResult(play, title, qualityKey, headers, archiveMetadata) {
+  var quality = String(setting('quality', 'best'));
+  if (!qualityKey && quality === 'audio') {
+    var audio = dashAudioTrack(play.dash || {});
+    if (!audio) throw new Error('Bilibili 当前没有独立音频轨');
+    return mediaResolveResult(audioOnlyVariant(audio, title), headers, archiveMetadata);
+  }
+  var variants = buildVariantsFromPlay(play, title);
+  var chosenIndex = qualityKey ? chooseVariantIndex(variants, qualityKey) : chooseDashIndex(variants, quality);
+  if (chosenIndex < 0) throw new Error('Bilibili 未返回所选画质: ' + qualityKey);
+  var result = mediaResolveResult(variants[chosenIndex], headers, archiveMetadata);
+  if (!qualityKey) {
+    result.variants = variants;
+    result.defaultVariantIndex = chosenIndex;
+  }
+  return result;
+}
+
+function buildManifestVariantsFromPlay(play, title) {
+  // accept_quality also contains login-only qualities. Only expose variants
+  // that have an actual video URL, otherwise selecting one creates an item
+  // that can never be resolved successfully.
+  var variants = buildVariantsFromPlay(play, title).slice();
+  variants.sort(function(a, b) {
+    if (Number(b.height) !== Number(a.height)) return Number(b.height) - Number(a.height);
+    return (Number(b.qualityId) || 0) - (Number(a.qualityId) || 0);
+  });
+  return variants.slice(0, MAX_VARIANTS);
+}
+
+
+function selectListedQualityVariants(variants, highestQualityOnly) {
+  if (!highestQualityOnly) return variants;
+  var best = null;
+  for (var i = 0; i < variants.length; i++) {
+    var variant = variants[i] || {};
+    var height = Number(variant.height) || 0;
+    if (!height) continue;
+    if (!best || height > Number(best.height) ||
+        (height === Number(best.height) &&
+          (Number(variant.qualityId) || 0) > (Number(best.qualityId) || 0))) {
+      best = variant;
+    }
+  }
+  return best ? [best] : [];
+}
+
+function buildEpisodeItems(episodes, qualityVariants) {
+  var items = [];
+  for (var ii = 0; ii < episodes.length; ii++) {
+    var episode = episodes[ii];
+    var variants = qualityVariants[ii] || [];
+    var added = false;
+    for (var vi = 0; vi < variants.length; vi++) {
+      var variant = variants[vi];
+      if (!(Number(variant.height) > 0)) continue;
+      var qualityKey = variantQualityKey(variant);
+      if (!qualityKey) continue;
+      items.push({
+        id: 'ep:' + episode.id + '@q:' + qualityKey,
+        name: episode.baseName + ' [' + variantQualityTag(variant) + '].' + (variant.container || 'mp4'),
+        path: episode.path,
+        size: Number(variant.totalBytes) > 0 ? Number(variant.totalBytes) : 0,
+        kind: 'file',
+      });
+      added = true;
+    }
+    if (!added) items.push({ id: 'ep:' + episode.id, name: episode.baseName + '.mp4', path: episode.path, size: 0, kind: 'file' });
+  }
+  return fitManifestItems(items);
+}
+
+function chooseDashIndex(variants, quality) {
+  if (!variants.length) throw new Error('Bilibili 未返回可用画质');
+  if (quality === 'audio') {
+    for (var i = 0; i < variants.length; i++) {
+      if (variants[i].height === 0) return i;
+    }
+    throw new Error('Bilibili 当前没有独立音频轨');
+  }
+  if (quality === 'best') return 0;
+  var target = Number(quality);
+  if (!(target > 0)) throw new Error('不支持的画质设置: ' + String(quality));
+  var best = -1;
+  var bestHeight = 0;
+  for (var j = 0; j < variants.length; j++) {
+    var height = Number(variants[j].height) || 0;
+    if (height && height <= target && height >= bestHeight) {
+      best = j;
+      bestHeight = height;
+    }
+  }
+  if (best < 0) throw new Error('Bilibili 没有不超过 ' + target + 'p 的可用画质');
+  return best;
+}
+
+// 订阅轮询会直接为条目建任务，单次只解析最近一批分集，避免长篇番剧或大量番外
+// 让一次订阅调用超过宿主的墙钟预算。核心会保留已知 guid，后续轮询继续尝试最新分集。
+function subscriptionOptions(kind) {
+  var quality = setting('quality', 'best');
+  if (quality === 'audio') quality = 'best';
+  if (typeof quality !== 'string' || !/^(best|2160|1440|1080|720|480)$/.test(quality)) {
+    throw new Error('插件默认画质必须是 best、2160、1440、1080、720 或 480');
+  }
+  var includeExtras = setting('includeExtras', false);
+  var highestQualityOnly = setting('highestQualityOnly', false);
+  if (typeof includeExtras !== 'boolean' || typeof highestQualityOnly !== 'boolean') {
+    throw new Error('插件的番外和最高画质设置必须是 boolean');
+  }
+  return {
+    quality: quality,
+    includeExtras: includeExtras,
+    highestQualityOnly: highestQualityOnly,
+    limit: kind === 'uploader' ? 20 : MAX_SUBSCRIPTION_EPISODES,
+  };
+}
+
+function subscriptionQualityCandidates(play, title, highestQualityOnly, quality) {
+  var candidates = [];
+  var variants = buildManifestVariantsFromPlay(play, title);
+  var ceiling = quality && quality !== 'best' ? Number(quality) : 0;
+  if (ceiling) variants = variants.filter(function(variant) { return Number(variant.height) <= ceiling; });
+  variants = selectListedQualityVariants(variants, Boolean(highestQualityOnly || ceiling));
+  for (var i = 0; i < variants.length; i++) {
+    var variant = variants[i] || {};
+    var qualityId = Number(variant.qualityId) || 0;
+    var height = Number(variant.height) || 0;
+    if (!qualityId || !height) continue;
+    candidates.push({
+      qualityId: qualityId,
+      height: height,
+      label: variant.label,
+      totalBytes: Number(variant.totalBytes) > 0 ? Number(variant.totalBytes) : 0,
+    });
+  }
+  return candidates;
+}
+var MAX_SUBSCRIPTION_EPISODES = 50;
+
+function subscriptionItemTitle(seriesTitle, name, variant) {
+  var label = String(variant && variant.label || '').trim();
+  if (!label || label === 'quality-unknown') {
+    var height = Number(variant && variant.height) || 0;
+    label = height ? height + 'p' : 'unknown-quality';
+    var qualityId = Number(variant && variant.qualityId) || 0;
+    if (qualityId) label += ' [qn' + qualityId + ']';
+  }
+  var sourceName = String(variant && variant.fileName || '');
+  var extensionMatch = /\.([a-z0-9]{1,8})$/i.exec(sourceName);
+  var extension = extensionMatch ? extensionMatch[1].toLowerCase() : 'mp4';
+  return sanitizeFileName(seriesTitle + ' - ' + name + ' [' + label + '].' + extension);
+}
+
+function subscriptionEpisodeGroups(result, includeExtras) {
+  var groups = [];
+  if (Array.isArray(result.episodes)) groups.push({ title: '正片', episodes: filterBangumiEpisodes(result.episodes, includeExtras) });
+  if (includeExtras && Array.isArray(result.section)) {
+    for (var i = 0; i < result.section.length; i++) {
+      var section = result.section[i];
+      if (section && Array.isArray(section.episodes)) {
+        groups.push({ title: section.title || '番外', episodes: section.episodes });
+      }
+    }
+  }
+  return groups;
+}
+
+function uploaderMidFromUrl(url) {
+  var value = String(url || '').trim();
+  var match = /space\.bilibili\.com\/(\d+)/i.exec(value);
+  if (match && match[1]) return match[1];
+  match = /[?&]mid=(\d+)/i.exec(value);
+  if (match && match[1]) return match[1];
+  if (/^\d+$/.test(value)) return value;
+  return '';
+}
+function isUploaderUrl(url) { return Boolean(uploaderMidFromUrl(url)); }
+function uploaderInfoPath() { return '/x/space/wbi/acc/info'; }
+function uploaderVideosPath() { return '/x/space/wbi/arc/search'; }
+function uploaderVideoUrl(bvid) { return 'https://www.bilibili.com/video/' + encodeURIComponent(bvid); }
+function videoPlayUrl(video, qualityId) {
+  var qn = Number(qualityId) || 127;
+  return '/x/player/playurl?bvid=' + encodeURIComponent(video.bvid) + '&cid=' + encodeURIComponent(video.cid) +
+    '&qn=' + encodeURIComponent(qn) + '&fnval=4048&fourk=1&fnver=0&otype=json&platform=pc';
+}
+function uploaderVideoTitle(uploaderName, videoTitle, variant) {
+  var label = String(variant && variant.label || '').trim() || 'unknown-quality';
+  var sourceName = String(variant && variant.fileName || '');
+  var extensionMatch = /\.([a-z0-9]{1,8})$/i.exec(sourceName);
+  var extension = extensionMatch ? extensionMatch[1].toLowerCase() : 'mp4';
+  return sanitizeFileName(uploaderName + ' - ' + videoTitle + ' [' + label + '].' + extension);
+}
+async function listUploaderVideos(mid, ctx, cookie, limit) {
+  var pageSize = Math.min(30, Math.max(1, Number(limit) || 20));
+  var listing = await apiGetWbi(uploaderVideosPath(), { mid: mid, ps: pageSize, pn: 1, order: 'pubdate', platform: 'web', web_location: '1550101' }, ctx, cookie);
+  var data = listing && listing.list ? listing.list : listing;
+  var videos = data && Array.isArray(data.vlist) ? data.vlist : [];
+  var normalized = [], seen = {};
+  for (var i = 0; i < videos.length && normalized.length < pageSize; i++) {
+    var item = videos[i] || {};
+    var bvid = String(item.bvid || item.BV || '');
+    if (!bvid || seen[bvid]) continue;
+    seen[bvid] = true;
+    normalized.push({
+      bvid: bvid,
+      aid: Number(item.aid) || 0,
+      title: sanitizeFileName(String(item.title || bvid).replace(/<[^>]+>/g, '')),
+      description: String(item.description || ''),
+      cover: String(item.pic || ''),
+      pubdate: episodePubDate({ pub_time: item.created }),
+      duration: String(item.length || ''),
+    });
+  }
+  var nextIndex = 0;
+  async function worker() {
+    while (true) {
+      var index = nextIndex++;
+      if (index >= normalized.length) return;
+      var current = normalized[index];
+      try {
+        var view = await apiGet('/x/web-interface/view?bvid=' + encodeURIComponent(current.bvid), ctx, cookie);
+        var pages = view && Array.isArray(view.pages) ? view.pages : [];
+        current.cid = Number((pages[0] || {}).cid) || 0;
+        current.pageCount = pages.length;
+      } catch (e) { current.cid = 0; }
+    }
+  }
+  var workers = Math.min(4, normalized.length), jobs = [];
+  for (var wi = 0; wi < workers; wi++) jobs.push(worker());
+  await Promise.all(jobs);
+  var ready = normalized.filter(function(video) { return video.cid > 0; });
+  if (ready.length < normalized.length) pluginLog('warn', '[bilibili] subscription uploader metadata failures', { failed: normalized.length - ready.length, total: normalized.length });
+  return ready;
+}
+async function subscribeUploader(ctx) {
+  var mid = uploaderMidFromUrl(ctx.url);
+  if (!mid) throw new Error('无法从 Bilibili UP 主链接识别 mid');
+  var cookie = await effectiveCookie(ctx);
+  var infoResult = await apiGetWbi(uploaderInfoPath(), { mid: mid }, ctx, cookie);
+  var info = infoResult && infoResult.card ? infoResult.card : infoResult;
+  var uploaderName = sanitizeFileName(String((info && (info.name || info.uname)) || ('UP主 ' + mid)));
+  var options = subscriptionOptions('uploader');
+  var videos = await listUploaderVideos(mid, ctx, cookie, options.limit);
+  if (!videos.length) throw new Error('Bilibili 未返回可订阅的普通投稿视频');
+  var items = [];
+  var failed = 0;
+  for (var i = 0; i < videos.length; i++) {
+    var video = videos[i];
+    try {
+      var play = await apiGet(videoPlayUrl(video), ctx, cookie);
+      var variants = subscriptionQualityCandidates(play, video.title, options.highestQualityOnly, options.quality);
+      if (!variants.length) failed++;
+      for (var vi = 0; vi < variants.length; vi++) {
+        var variant = variants[vi], qualityKey = String(variant.qualityId);
+        items.push({
+          guid: 'video:' + video.bvid + ':cid:' + String(video.cid) + '@q:' + qualityKey,
+          title: uploaderVideoTitle(uploaderName, video.title, variant),
+          link: uploaderVideoUrl(video.bvid),
+          enclosureUrl: '',
+          enclosureLength: Number(variant.totalBytes) > 0 ? Number(variant.totalBytes) : 0,
+          pubDate: video.pubdate,
+          resolverItem: 'video:' + video.bvid + ':cid:' + String(video.cid) + '@q:' + qualityKey,
+        });
+      }
+    } catch (e) { failed++; }
+  }
+  if (failed) pluginLog('warn', '[bilibili] subscription uploader item failures', { failed: failed, total: videos.length });
+
+  if (!items.length) throw new Error('Bilibili 投稿均未返回可下载画质');
+  return { title: 'Bilibili UP主 - ' + uploaderName, link: ctx.url, items: items };
+}
+function ordinaryVideoMetadata(ctx) {
+  var metadata = { platform: 'bilibili', mediaKind: 'post' };
+  if (ctx.creatorId) metadata.creatorId = String(ctx.creatorId);
+  if (ctx.creatorName) metadata.creatorName = String(ctx.creatorName);
+  if (ctx.collectionId) metadata.collectionId = String(ctx.collectionId);
+  if (ctx.collectionTitle) metadata.collectionTitle = String(ctx.collectionTitle);
+  return metadata;
+}
+
+function ordinaryVideoContext(ctx, view) {
+  return Object.assign({}, ctx, {
+    creatorId: String(view.owner && view.owner.mid || ''),
+    creatorName: String(view.owner && view.owner.name || ''),
+    collectionId: String(view.ugc_season && view.ugc_season.id || ''),
+    collectionTitle: String(view.ugc_season && view.ugc_season.title || ''),
+  });
+}
+
+function ordinaryVideoParts(view, explicitPage) {
+  var pages = Array.isArray(view.pages) ? view.pages : [];
+  if (explicitPage && (!pages[explicitPage - 1] || !Number(pages[explicitPage - 1].cid))) {
+    throw new Error('Bilibili 未返回指定分 P 的视频信息');
+  }
+  var title = view.title || view.bvid;
+  var parts = [], seen = new Set();
+  function add(bvid, aid, cid, name, path, cover) {
+    if (!/^BV[0-9a-z]+$/i.test(String(bvid || '')) || !/^[1-9]\d*$/.test(String(cid || ''))) return;
+    var id = 'video:' + bvid + ':cid:' + cid;
+    if (seen.has(id)) return;
+    seen.add(id);
+    parts.push({ id: id, bvid: bvid, aid: aid, cid: cid, title: sanitizeFileName(name || bvid), path: path, cover: cover });
+  }
+  var sections = !explicitPage && view.ugc_season && Array.isArray(view.ugc_season.sections) ? view.ugc_season.sections : [];
+  for (var section of sections) {
+    if (!section || !Array.isArray(section.episodes)) continue;
+    var path = section.title ? sanitizePath(section.title) : '';
+    for (var episode of section.episodes) {
+      if (!episode) continue;
+      var arc = episode.arc || {};
+      var page = episode.page || {};
+      add(episode.bvid || arc.bvid, episode.aid || arc.aid, episode.cid || page.cid || arc.first_cid,
+        episode.title || page.part || arc.title, path, arc.pic || page.first_frame);
+    }
+  }
+  for (var i = 0; i < pages.length; i++) {
+    if (!pages[i] || (explicitPage && i !== explicitPage - 1)) continue;
+    var name = pages.length > 1 ? title + ' - P' + (i + 1) + ' ' + String(pages[i].part || '') : title;
+    add(view.bvid, view.aid, pages[i].cid, name, '', pages[i].first_frame || view.pic);
+  }
+  if (!parts.length) throw new Error('Bilibili 未返回可下载的普通视频分 P');
+  if (parts.length > MAX_EPISODES) throw new Error('Bilibili 视频分 P 或合集超过 NetPulse 单次 1000 项上限；请用 ?p=N 下载单 P');
+  return parts;
+}
+async function resolveVideoPage(ctx) {
+  var url = String(ctx.url || '').trim();
+  var match = /^https?:\/\/(?:(?:www|m)\.)?bilibili\.com\/video\/(BV[0-9a-z]+|av\d+)\/?(?:[?#]|$)/i.exec(url);
+  if (!match) throw new Error('无法从 Bilibili 视频链接识别 BV 或 AV 号');
+  var id = match[1];
+  var lookup = /^av/i.test(id) ? 'aid=' + id.slice(2) : 'bvid=' + encodeURIComponent(id);
+  var cookie = await effectiveCookie(ctx);
+  var view = await apiGet('/x/web-interface/view?' + lookup, ctx, cookie);
+  var pageMatch = /[?&]p=([^&#]*)/i.exec(url.split('#')[0]);
+  var pageNumber = pageMatch ? Number(pageMatch[1]) : 0;
+  if (pageMatch && (!/^[1-9]\d*$/.test(pageMatch[1]) || !Number.isSafeInteger(pageNumber))) {
+    throw new Error('Bilibili 视频分 P 参数非法');
+  }
+  var parts = ordinaryVideoParts(view, pageNumber);
+  var context = ordinaryVideoContext(ctx, view);
+  var kinds = selectedBiliResources();
+  if (parts.length === 1 && !kinds.length) {
+    return await resolveUploaderVideo(Object.assign(context, { title: parts[0].title, resolverItem: parts[0].id }), cookie);
+  }
+  var audioOnly = setting('quality', 'best') === 'audio';
+  var items = parts.map(function(part) {
+    return { id: part.id, name: part.title + (audioOnly ? ' [audio]' : '.mp4'), path: part.path, size: 0, kind: 'file' };
+  });
+  items = await withBiliResourceItems(ctx, items, parts, cookie, kinds);
+  var title = sanitizeFileName(context.collectionTitle || view.title || view.bvid);
+  return { manifest: { name: title, items: fitManifestItems(items), archiveMetadata: ordinaryVideoMetadata(context) } };
+}
+
+async function resolveUploaderVideo(ctx, knownCookie) {
+  var match = /^video:([^:]+):cid:(\d+)(?:@q:(\d+|h\d+))?$/.exec(String(ctx.resolverItem || ''));
+  if (!match) throw new Error('Bilibili 投稿视频标识非法: ' + String(ctx.resolverItem || ''));
+  var video = { bvid: match[1], cid: Number(match[2]) }, qualityKey = match[3] || '';
+  var cookie = knownCookie == null ? await effectiveCookie(ctx) : knownCookie;
+  var requestedQualityId = /^\d+$/.test(qualityKey) ? Number(qualityKey) : 0;
+  var play = await apiGet(videoPlayUrl(video, requestedQualityId), ctx, cookie);
+  var resolvedTitle = '';
+  var resolvedView = null;
+  if (!ctx.title || !ctx.creatorId || !ctx.creatorName) {
+    try {
+      resolvedView = await apiGet('/x/web-interface/view?bvid=' + encodeURIComponent(video.bvid), ctx, cookie);
+      resolvedTitle = String(resolvedView && resolvedView.title || '');
+    } catch (e) {}
+  }
+  var resultContext = Object.assign({}, ctx);
+  if (!resultContext.creatorId && resolvedView && resolvedView.owner) resultContext.creatorId = String(resolvedView.owner.mid || '');
+  if (!resultContext.creatorName && resolvedView && resolvedView.owner) resultContext.creatorName = String(resolvedView.owner.name || '');
+  if (!resultContext.collectionId && resolvedView && resolvedView.ugc_season) {
+    resultContext.collectionId = String(resolvedView.ugc_season.id || '');
+    resultContext.collectionTitle = String(resolvedView.ugc_season.title || '');
+  }
+  var pages = resolvedView && Array.isArray(resolvedView.pages) ? resolvedView.pages : [];
+  var pageIndex = pages.findIndex(function(page) { return page && Number(page.cid) === video.cid; });
+  if (resolvedTitle && pages.length > 1 && pageIndex >= 0) {
+    resolvedTitle += ' - P' + (pageIndex + 1) + ' ' + String(pages[pageIndex].part || '');
+  }
+  var title = sanitizeFileName(String(ctx.title || resolvedTitle || video.bvid));
+  return resolvePlayResult(play, title, qualityKey, requestHeaders(cookie, ctx), ordinaryVideoMetadata(resultContext));
+}
+
+async function subscribeBangumi(ctx) {
+  var options = subscriptionOptions('bangumi');
+
+  var cookie = await effectiveCookie(ctx);
+  var seasonId = await seasonIdFromUrl(ctx.url, ctx, cookie);
+  if (!seasonId) throw new Error('无法从 Bilibili 番剧链接识别 season_id 或 media_id');
+
+
+  var result = await apiGet(
+    '/pgc/view/web/season?season_id=' + encodeURIComponent(seasonId),
+    ctx,
+    cookie
+  );
+  var title = sanitizeFileName(result.title || result.season_title || ('Bilibili ' + seasonId));
+  var episodes = [];
+  var seen = {};
+  var groups = subscriptionEpisodeGroups(result, options.includeExtras);
+  for (var gi = 0; gi < groups.length; gi++) {
+    var group = groups[gi];
+    for (var ei = 0; ei < group.episodes.length; ei++) {
+      var episode = group.episodes[ei] || {};
+      var epId = String(episode.id || episode.ep_id || '');
+      if (!epId || seen[epId]) continue;
+      seen[epId] = true;
+      episodes.push({
+        id: epId,
+        episode: episode,
+        name: episodeDisplayName(result, epId, episode),
+      });
+    }
+  }
+  if (episodes.length > options.limit) {
+    pluginLog('info', '[bilibili] subscription limited to recent episodes', { total: episodes.length, limit: options.limit });
+    episodes = episodes.slice(-options.limit);
+  }
+  if (!episodes.length) throw new Error('Bilibili 未返回可订阅分集');
+
+  // 订阅条目沿用直接下载的 DASH 画质集合；实际下载时由核心把
+  // resolverItem 传回本插件二段解析，以复用视频轨 + 音频轨合并逻辑。
+  var items = new Array(episodes.length);
+  var nextIndex = 0;
+  var failed = 0;
+  async function worker() {
+    while (true) {
+      var index = nextIndex++;
+      if (index >= episodes.length) return;
+      var current = episodes[index];
+      try {
+        var play = await apiGet(playerPlayUrl(current.episode), ctx, cookie);
+        var candidates = subscriptionQualityCandidates(play, current.name, options.highestQualityOnly, options.quality);
+        if (!candidates.length) failed++;
+        for (var qi = 0; qi < candidates.length; qi++) {
+          var candidate = candidates[qi];
+          var qualityKey = String(candidate.qualityId);
+          var displayVariant = {
+            label: candidate.label,
+            qualityId: candidate.qualityId,
+            height: candidate.height,
+            fileName: current.name + '.mp4',
+          };
+          var item = {
+            guid: 'ep:' + current.id + '@q:' + qualityKey,
+            title: subscriptionItemTitle(title, current.name, displayVariant),
+            link: episodePageUrl(current.id, current.episode),
+            enclosureUrl: '',
+            enclosureLength: Number(candidate.totalBytes) > 0 ? Number(candidate.totalBytes) : 0,
+            pubDate: episodePubDate(current.episode),
+            resolverItem: 'ep:' + current.id + '@q:' + qualityKey,
+          };
+          if (!items[index]) items[index] = [];
+          items[index].push(item);
+        }
+      } catch (e) {
+        failed++;
+      }
+    }
+  }
+  var workers = Math.min(6, episodes.length);
+  var jobs = [];
+  for (var wi = 0; wi < workers; wi++) jobs.push(worker());
+  await Promise.all(jobs);
+
+  var ready = [];
+  for (var ri = 0; ri < items.length; ri++) {
+    if (items[ri]) {
+      for (var ii = 0; ii < items[ri].length; ii++) ready.push(items[ri][ii]);
+    }
+  }
+  if (failed) pluginLog('warn', '[bilibili] subscription bangumi item failures', { failed: failed, total: episodes.length });
+  if (!ready.length) throw new Error('Bilibili 分集均未返回可下载的单文件直链');
+  return {
+    title: title,
+    link: ctx.url,
+    items: ready,
+  };
+}
+
+// Manifest tokens contain only stable media identifiers, never expiring URLs.
+var RESOURCE_KINDS = new Set(['cover', 'subtitles', 'aiSubtitles', 'danmakuXml', 'danmakuAss']);
+
+function resourceName(value) {
+  return sanitizeFileName(String(value || 'Bilibili'));
+}
+
+function resourceUrl(value) {
+  var url = String(value || '').replace(/^(?:http:)?\/\//i, 'https://');
+  return /^https:\/\/(?:[a-z0-9-]+\.)*(?:bilibili\.com|hdslb\.com|bilivideo\.com|bilivideo\.cn|biliapi\.net)(?:[/?][^\x00-\x20\\]*|$)/i.test(url) ? url : '';
+}
+
+function resourceImageExtension(url) {
+  return (/\.(jpe?g|png|webp|avif)(?:[?#@]|$)/i.exec(url) || ['', 'jpg'])[1].toLowerCase();
+}
+
+function resourceManifestItem(media, kind, name, lang) {
+  return { id: 'resource:' + kind + ':' + media.id + (lang ? ':lang:' + lang : ''),
+    name: name, path: media.path || '', size: 0, kind: 'file' };
+}
+
+async function resourceMediaFromId(ctx, cookie) {
+  var token = /^resource:([^:]+):(?:(ep):([1-9]\d*)|video:(BV[0-9a-z]+):cid:([1-9]\d*))(?:\:lang:([a-z0-9_-]{1,48}))?$/i.exec(String(ctx.resolverItem || ''));
+  if (!token || !RESOURCE_KINDS.has(token[1])) throw new Error('Bilibili 附加资源标识无效');
+  var media;
+  if (token[2]) {
+    var epId = token[3];
+    var season = await apiGet('/pgc/view/web/season?ep_id=' + epId, ctx, cookie);
+    var episode = findEpisode(season, epId);
+    if (!episode) throw new Error('Bilibili 未返回附加资源所属分集');
+    media = { bvid: episode.bvid || episode.bv_id, cid: episode.cid, aid: episode.aid,
+      title: episodeDisplayName(season, epId, episode), cover: episode.cover || season.cover };
+  } else {
+    var bvid = token[4], cid = token[5];
+    var view = await apiGet('/x/web-interface/view?bvid=' + encodeURIComponent(bvid), ctx, cookie);
+    var pages = Array.isArray(view.pages) ? view.pages : [];
+    var index = pages.findIndex(function(page) { return page && String(page.cid) === cid; });
+    var title = view.title || bvid;
+    if (index >= 0 && pages.length > 1) title += ' - P' + (index + 1) + ' ' + String(pages[index].part || '');
+    media = { bvid: bvid, cid: cid, aid: view.aid, title: title, cover: (index >= 0 && pages[index].first_frame) || view.pic };
+  }
+  return { media: media, kind: token[1], lang: token[6] || '' };
+}
+
+async function resourcePlayerData(ctx, media, cookie) {
+  var params = media.bvid ? { bvid: media.bvid, cid: media.cid } : { aid: media.aid, cid: media.cid };
+  try {
+    return await apiGetWbi('/x/player/wbi/v2', params, ctx, cookie);
+  } catch (error) {
+    var query = Object.keys(params).map(function(key) { return key + '=' + encodeURIComponent(params[key]); }).join('&');
+    return await apiGet('/x/player/v2?' + query, ctx, cookie);
+  }
+}
+
+function resourceSubtitleEntries(player) {
+  var result = [];
+  var blocks = [player && player.subtitle, player && player.ai_subtitle, player && player.subtitle_info];
+  blocks.forEach(function (block) {
+    var subtitles = block && (block.subtitles || block.list);
+    if (!Array.isArray(subtitles)) return;
+    subtitles.forEach(function (sub) {
+      if (!sub || !sub.subtitle_url) return;
+      var language = sub.lan || sub.lan_doc || 'und';
+      var ai = !!(sub.ai_type || sub.type === 'ai' || block.ai_subtitle || block.type === 'ai' || /^ai-/i.test(language));
+      result.push({ url: sub.subtitle_url, lang: language, label: sub.lan_doc || language || (ai ? 'AI 字幕' : '字幕'), ai: ai });
+    });
+  });
+  return result;
+}
+function resourceProtoTracks(base64) {
+  var binary = atob(String(base64 || ''));
+  if (binary.length > 1024 * 1024) throw new Error('Bilibili subtitle metadata is too large');
+  var bytes = new Uint8Array(binary.length);
+  for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  function parseFields(input, wanted) {
+    var offset = 0, fields = [];
+    function varint() {
+      var result = 0, factor = 1;
+      for (var n = 0; n < 10; n++) {
+        if (offset >= input.length) throw new Error('Truncated Bilibili subtitle metadata');
+        var byte = input[offset++];
+        result += (byte & 127) * factor;
+        if (byte < 128) return result;
+        factor *= 128;
+      }
+      throw new Error('Invalid Bilibili subtitle metadata varint');
+    }
+    while (offset < input.length) {
+      var tag = varint(), number = Math.floor(tag / 8), wire = tag & 7;
+      if (!number) throw new Error('Invalid Bilibili subtitle metadata field');
+      if (wire === 0) varint();
+      else if (wire === 1 || wire === 5) {
+        offset += wire === 1 ? 8 : 4;
+        if (offset > input.length) throw new Error('Truncated Bilibili subtitle metadata');
+      } else if (wire === 2) {
+        var length = varint(), end = offset + length;
+        if (end > input.length) throw new Error('Truncated Bilibili subtitle metadata');
+        if (number === wanted) fields.push(input.slice(offset, end));
+        offset = end;
+      } else throw new Error('Unsupported Bilibili subtitle metadata wire type');
+    }
+    return fields;
+  }
+  function utf8(array) {
+    var text = '';
+    for (var p = 0; p < array.length; p += 8192) {
+      var chunk = array.subarray(p, Math.min(array.length, p + 8192));
+      text += String.fromCharCode.apply(null, chunk);
+    }
+    try { return decodeURIComponent(escape(text)); } catch (e) { throw new Error('Invalid Bilibili subtitle metadata text'); }
+  }
+  var tracks = [];
+  parseFields(bytes, 1).forEach(function (data) {
+    parseFields(data, 3).forEach(function (track) {
+      var fields = {};
+      [3, 4, 5].forEach(function (field) {
+        var values = parseFields(track, field);
+        if (values.length) fields[field] = utf8(values[0]);
+      });
+      var language = fields[3] || 'und';
+      tracks.push({ lan: language, lan_doc: fields[4] || language || 'Subtitle', subtitle_url: fields[5], ai: /^ai-/i.test(language) });
+    });
+  });
+  return tracks;
+}
+async function resourceProtoSubtitleData(ctx, media, cookie) {
+  if (!media.cid || (!media.bvid && !media.aid)) return [];
+  var aid = media.aid;
+  if (!aid && media.bvid) {
+    var video = await apiGet('/x/web-interface/view?bvid=' + encodeURIComponent(media.bvid), ctx, cookie);
+    aid = video.aid;
+  }
+  if (!aid) return [];
+  var query = [
+    'oid=' + encodeURIComponent(media.cid),
+    'pid=' + encodeURIComponent(aid),
+    'context_ext=' + encodeURIComponent('{\"video_type\":1}'),
+    'type=1',
+    'cur_production_type=0',
+    'preferred_language=ai-zh',
+    'playlist_switch=0',
+  ].join('&');
+  var response = await flux.fetch({ method: 'GET', url: API_BASE + '/x/v2/subtitle/web/view?' + query,
+    headers: requestHeaders(cookie, ctx), responseType: 'base64' });
+  if (!response || response.status < 200 || response.status >= 300) return [];
+  if (response.truncated) throw new Error('Bilibili AI 字幕元数据已截断');
+  var body = String(response.body || '');
+  if (/^\s*\{/.test(atob(body.slice(0, 44)))) return [];
+  return resourceProtoTracks(body);
+}
+async function resourceSubtitleTracks(ctx, media, cookie, includeAi) {
+  if (!media.cid || (!media.bvid && !media.aid)) return [];
+  var entries = [], playerError;
+  try {
+    entries = resourceSubtitleEntries(await resourcePlayerData(ctx, media, cookie));
+  } catch (error) {
+    playerError = error;
+  }
+  if (includeAi && !entries.some(function(entry) { return entry.ai && resourceUrl(entry.url); })) {
+    try {
+      for (var sub of await resourceProtoSubtitleData(ctx, media, cookie)) {
+        if (sub.ai) entries.push({ url: sub.subtitle_url, lang: sub.lan, label: sub.lan_doc, ai: true });
+      }
+    } catch (error) {
+      if (!entries.length) throw error;
+      pluginLog('warn', '[bilibili] AI subtitle lookup failed; human tracks remain available');
+    }
+  }
+  if (!entries.length && playerError) throw playerError;
+  var seen = new Set();
+  return entries.filter(function(entry) {
+    var key = String(entry.ai) + ':' + entry.lang;
+    if (!/^[a-z0-9_-]{1,48}$/i.test(entry.lang) || !resourceUrl(entry.url) || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function resourceSubtitleName(label, track) {
+  return label + ' - ' + (track.ai ? 'AI ' : '') + resourceName(track.label) + ' [' + track.lang + '].srt';
+}
+
+async function listBiliResources(ctx, media, cookie, kinds) {
+  var selected = new Set(kinds), items = [];
+  var label = resourceName(media.title), image = resourceUrl(media.cover);
+  if (selected.has('cover') && image) {
+    items.push(resourceManifestItem(media, 'cover', label + ' - 封面.' + resourceImageExtension(image)));
+  }
+  if (selected.has('subtitles') || selected.has('aiSubtitles')) {
+    var tracks = await resourceSubtitleTracks(ctx, media, cookie, selected.has('aiSubtitles'));
+    for (var track of tracks) {
+      var key = track.ai ? 'aiSubtitles' : 'subtitles';
+      if (selected.has(key)) items.push(resourceManifestItem(media, key, resourceSubtitleName(label, track), track.lang));
+    }
+  }
+  if (media.cid) {
+    if (selected.has('danmakuXml')) items.push(resourceManifestItem(media, 'danmakuXml', label + ' - 弹幕.xml'));
+    if (selected.has('danmakuAss')) items.push(resourceManifestItem(media, 'danmakuAss', label + ' - 弹幕.ass'));
+  }
+  return items;
+}
+
+function resourceSrtTime(seconds) {
+  var ms = Math.max(0, Math.round((Number(seconds) || 0) * 1000));
+  var h = Math.floor(ms / 3600000); ms %= 3600000;
+  var m = Math.floor(ms / 60000); ms %= 60000;
+  var s = Math.floor(ms / 1000); ms %= 1000;
+  function pad(n, length) { return String(n).padStart(length, '0'); }
+  return pad(h, 2) + ':' + pad(m, 2) + ':' + pad(s, 2) + ',' + pad(ms, 3);
+}
+function resourceSubtitleSrt(json) {
+  if (!json || !Array.isArray(json.body)) throw new Error('Bilibili 字幕没有有效的字幕段');
+  var cues = json.body.filter(function(cue) {
+    return cue && Number.isFinite(cue.from) && Number.isFinite(cue.to) && cue.from >= 0 &&
+      cue.to >= cue.from && typeof cue.content === 'string' && cue.content.trim();
+  });
+  if (!cues.length) throw new Error('Bilibili 字幕没有有效的字幕段');
+  return cues.map(function(cue, index) {
+    return (index + 1) + '\n' + resourceSrtTime(cue.from) + ' --> ' + resourceSrtTime(cue.to) + '\n' +
+      cue.content.replace(/\r\n?/g, '\n').split('\n').filter(Boolean).join('\n');
+  }).join('\n\n') + '\n';
+}
+
+function resourceAssTime(seconds) {
+  return resourceSrtTime(Math.round(seconds * 100) / 100).replace(',', '.').slice(0, -1);
+}
+
+function resourceXmlText(text) {
+  var entities = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+  return text.replace(/&(amp|lt|gt|quot|apos|#x[\da-f]+|#\d+);/gi, function(match, entity) {
+    if (entity[0] !== '#') return entities[entity.toLowerCase()] || match;
+    var n = entity[1].toLowerCase() === 'x' ? parseInt(entity.slice(2), 16) : Number(entity.slice(1));
+    return n > 0 && n <= 0x10ffff && !(n >= 0xd800 && n <= 0xdfff) ? String.fromCodePoint(n) : match;
+  });
+}
+
+function resourceDanmakuAss(xml) {
+  var header = '[Script Info]\nTitle: Bilibili Danmaku\nScriptType: v4.00+\nPlayResX: 1920\nPlayResY: 1080\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\nStyle: Default,Arial,36,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,1,2,0,7,20,20,20,1\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n';
+  if (!/<i(?:\s[^>]*)?>[\s\S]*<\/i>/.test(xml)) throw new Error('Bilibili 返回的弹幕不是有效 XML');
+  var entries = [], match, re = /<d\s+[^>]*\bp="([^"]*)"[^>]*>([\s\S]*?)<\/d>/g;
+  while ((match = re.exec(xml))) {
+    var raw = match[1].split(',');
+    var start = Number(raw[0]), mode = Number(raw[1]), color = Number(raw[3]);
+    if (!Number.isFinite(start) || start < 0 || ![1, 2, 3, 4, 5, 6].includes(mode)) continue;
+    var text = resourceXmlText(match[2]).replace(/[{}\\\r\n]/g, ' ').trim();
+    if (!text) continue;
+    var size = Math.min(64, Math.max(18, Number(raw[2]) || 25));
+    var rgb = Number.isInteger(color) && color >= 0 && color <= 0xffffff ? color : 0xffffff;
+    entries.push({ start: start, mode: mode, text: text, size: size, rgb: rgb });
+  }
+  entries.sort(function(a, b) { return a.start - b.start; });
+  var rows = [], scroll = new Array(20).fill(0), top = new Array(5).fill(0), bottom = new Array(5).fill(0);
+  for (var entry of entries) {
+    var lanes = entry.mode === 4 ? bottom : entry.mode === 5 ? top : scroll;
+    var lane = lanes.findIndex(function(until) { return until <= entry.start; });
+    if (lane < 0) lane = lanes.indexOf(Math.min.apply(null, lanes));
+    var duration = lanes === scroll ? 8 : 4;
+    lanes[lane] = entry.start + duration;
+    var y = entry.mode === 4 ? 1062 - lane * 54 : 18 + lane * 52;
+    var position;
+    if (lanes !== scroll) {
+      position = '\\an' + (entry.mode === 4 ? '2' : '8') + '\\pos(960,' + y + ')';
+    } else {
+      var left = -Math.max(1, Array.from(entry.text).length) * entry.size, right = 1920;
+      position = '\\an7\\move(' + (entry.mode === 6 ? left : right) + ',' + y + ',' +
+        (entry.mode === 6 ? right : left) + ',' + y + ')';
+    }
+    var bgr = ((entry.rgb & 255) << 16) | (entry.rgb & 0xff00) | (entry.rgb >> 16);
+    var style = '{' + position + '\\fs' + entry.size + '\\c&H' + bgr.toString(16).padStart(6, '0') + '&}';
+    rows.push('Dialogue: 0,' + resourceAssTime(entry.start) + ',' + resourceAssTime(entry.start + duration) +
+      ',Default,,0,0,0,,' + style + entry.text);
+  }
+  return header + rows.join('\n') + (rows.length ? '\n' : '');
+}
+
+function resourceDownloadHeaders() {
+  return { Referer: 'https://www.bilibili.com/', 'User-Agent': USER_AGENT };
+}
+
+async function resourceFetch(url) {
+  var allowed = resourceUrl(url);
+  if (!allowed) throw new Error('Bilibili 附加资源地址不在允许的域名内');
+  var response = await flux.fetch({ method: 'GET', url: allowed, headers: resourceDownloadHeaders() });
+  if (!response || response.status < 200 || response.status >= 300) throw new Error('Bilibili 附加资源下载失败');
+  if (response.truncated) throw new Error('Bilibili 附加资源响应已截断');
+  return response.body || '';
+}
+
+function resourceContent(text, fileName) {
+  return { contentBase64: btoa(unescape(encodeURIComponent(text))), fileName: fileName };
+}
+
+async function resolveBiliResource(ctx) {
+  var cookie = await effectiveCookie(ctx);
+  var resolved = await resourceMediaFromId(ctx, cookie);
+  var media = resolved.media, kind = resolved.kind, name = resourceName(media.title);
+  if (kind === 'cover') {
+    var cover = resourceUrl(media.cover);
+    if (!cover) throw new Error('Bilibili 封面已不可用');
+    return { url: cover, fileName: name + ' - 封面.' + resourceImageExtension(cover), extraHeaders: resourceDownloadHeaders() };
+  }
+  if (kind === 'danmakuXml' || kind === 'danmakuAss') {
+    if (!/^[1-9]\d*$/.test(String(media.cid))) throw new Error('Bilibili 弹幕缺少 CID');
+    var xmlUrl = 'https://comment.bilibili.com/' + media.cid + '.xml';
+    if (kind === 'danmakuXml') return { url: xmlUrl, fileName: name + ' - 弹幕.xml', extraHeaders: resourceDownloadHeaders() };
+    return resourceContent(resourceDanmakuAss(await resourceFetch(xmlUrl)), name + ' - 弹幕.ass');
+  }
+  var ai = kind === 'aiSubtitles';
+  var tracks = await resourceSubtitleTracks(ctx, media, cookie, ai);
+  var chosen = tracks.find(function(track) { return track.ai === ai && track.lang === resolved.lang; });
+  if (!chosen) throw new Error('Bilibili 所选字幕轨已不可用');
+  return resourceContent(resourceSubtitleSrt(JSON.parse(await resourceFetch(chosen.url))), resourceSubtitleName(name, chosen));
+}
+
+function selectedBiliResources() {
+  return ['cover', 'subtitles', 'aiSubtitles', 'danmakuXml', 'danmakuAss'].filter(function(kind) {
+    return setting(kind, false) === true;
+  });
+}
+
+async function withBiliResourceItems(ctx, items, parts, cookie, kinds) {
+  if (!kinds.length) return items;
+  var resources = new Array(parts.length), next = 0, count = items.length;
+  async function worker() {
+    while (next < parts.length) {
+      var index = next++;
+      var more = await listBiliResources(ctx, parts[index], cookie, kinds);
+      count += more.length;
+      if (count > MAX_EPISODES) throw new Error('视频和附加资源超过 NetPulse 单次 1000 项上限；请缩小分集或附加资源范围');
+      resources[index] = more;
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(4, parts.length) }, worker));
+  return items.concat(resources.flat());
+}
+
+globalThis.resolve = async (ctx) => {
+  if (String(ctx.resolverItem || '').indexOf('resource:') === 0) return await resolveBiliResource(ctx);
+  if (String(ctx.resolverItem || '').indexOf('video:') === 0) return await resolveUploaderVideo(ctx);
+  if (ctx.resolverItem) return await resolveEpisode(ctx);
+  ctx = await expandBilibiliShortUrl(ctx);
+  if (/^https?:\/\/(?:(?:www|m)\.)?bilibili\.com\/video\//i.test(String(ctx.url || '').trim())) return await resolveVideoPage(ctx);
+  return await resolveManifest(ctx);
+};
+
+globalThis.subscribe = async (ctx) => {
+  ctx = await expandBilibiliShortUrl(ctx);
+  return isUploaderUrl(ctx.url) ? await subscribeUploader(ctx) : await subscribeBangumi(ctx);
+};

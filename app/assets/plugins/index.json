@@ -1,0 +1,983 @@
+[
+  {
+    "id": "m3u8-pro",
+    "identity": "community@m3u8-pro",
+    "name": "M3U8 超级下载器 Pro",
+    "version": "1.0.0",
+    "description": "把 M3U8 主播放列表交给 NetPulse 引擎：列出全部清晰度、按偏好预选、用网页标题命名、自动补 Referer/UA，并识别独立音轨、AES-128 与直播列表。",
+    "homepage": "https://github.com/Ouyangyouzi/fluxdown-m3u8-pro",
+    "match": [
+      "*m3u8*"
+    ],
+    "entry": "resolve.js",
+    "timeoutMs": 20000,
+    "settings": [
+      {
+        "key": "maxHeight",
+        "title": "默认清晰度上限",
+        "description": "画质选择框的默认选项。best = 最高码率；其余按不超过该高度的最高一档，没有更低的就取最低档。",
+        "type": "string",
+        "widget": "select",
+        "options": [
+          {
+            "value": "best",
+            "label": "最高（best）"
+          },
+          {
+            "value": "2160",
+            "label": "2160p / 4K"
+          },
+          {
+            "value": "1440",
+            "label": "1440p / 2K"
+          },
+          {
+            "value": "1080",
+            "label": "1080p"
+          },
+          {
+            "value": "720",
+            "label": "720p"
+          },
+          {
+            "value": "480",
+            "label": "480p"
+          },
+          {
+            "value": "360",
+            "label": "360p"
+          }
+        ],
+        "default": "1080"
+      },
+      {
+        "key": "container",
+        "title": "文件名扩展名",
+        "description": "auto = 主列表按 mp4、媒体列表按是否含 EXT-X-MAP 判断（fMP4 → mp4，TS → ts）。实际容器由 NetPulse 引擎决定，若扩展名不符请改这里。",
+        "type": "string",
+        "widget": "select",
+        "options": [
+          {
+            "value": "auto",
+            "label": "自动判断"
+          },
+          {
+            "value": "mp4",
+            "label": "mp4"
+          },
+          {
+            "value": "ts",
+            "label": "ts"
+          },
+          {
+            "value": "mkv",
+            "label": "mkv"
+          }
+        ],
+        "default": "auto"
+      },
+      {
+        "key": "nameSource",
+        "title": "文件名来源",
+        "description": "referrer = 网页地址（任务携带的 Referer）的最后一段；playlist = 播放列表文件名；none = 不干预命名。",
+        "type": "string",
+        "widget": "select",
+        "options": [
+          {
+            "value": "referrer",
+            "label": "网页地址（推荐）"
+          },
+          {
+            "value": "playlist",
+            "label": "播放列表文件名"
+          },
+          {
+            "value": "none",
+            "label": "不干预"
+          }
+        ],
+        "default": "referrer"
+      },
+      {
+        "key": "injectHeaders",
+        "title": "补齐 Referer / User-Agent",
+        "description": "任务没有携带 Referer 或 UA 时，用任务里记录的那份补上，适合防盗链 CDN。已有同名请求头不会被覆盖。",
+        "type": "boolean",
+        "default": "true"
+      },
+      {
+        "key": "injectOrigin",
+        "title": "补发 Origin",
+        "description": "只有 CDN 明确要求 Origin 时才打开；部分签名地址带上 Origin 反而会被拒。",
+        "type": "boolean",
+        "default": "false"
+      },
+      {
+        "key": "attachAudio",
+        "title": "分离音轨一并交给引擎（实验性）",
+        "description": "主列表用 EXT-X-MEDIA 把音频单独成轨时，把音轨地址作为 audioUrl 返回；NetPulse 会另建一个音频下载任务，不做自动合并。部分站点会让音画不同步，默认关闭。",
+        "type": "boolean",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "id": "github-accel",
+    "identity": "fluxdown@github-accel",
+    "name": "GitHub 加速",
+    "version": "1.0.0",
+    "description": "GitHub 文件下载自动加速：解析前对本次要下载的文件在各加速源上并行实测（Range 采样 64 KB），一次探测同时验证可用性与速度，选最快的改写直链；全部不可用则自动回退 GitHub 直连，加速失败绝不阻断下载。内置两个加速源——jsDelivr CDN（fastly.jsdelivr.net/gh，仅支持仓库内 blob/raw 文件、单文件 ≤ 20 MB，不支持 release 资产与源码归档）与 FastGit（fastgit.cc，hunshcn/gh-proxy 部署，release 资产 / archive 源码包 / 分支文件全类型）。覆盖 github.com（releases/download、archive、blob、raw）、raw.githubusercontent.com 与 gist.githubusercontent.com 链接。探测到 206 时回填 Range 支持让引擎直接多线程分段；同一链接会记住上次选中的源，续传恢复不换源。可在设置中固定加速源或直连，也可按行添加更多 gh-proxy 风格加速源参与测速，无需改代码即可扩展。",
+    "homepage": "https://github.com/zerx-lab/fluxdown-plugin-github-accel",
+    "match": [
+      "*://github.com/*",
+      "*://www.github.com/*",
+      "*://raw.githubusercontent.com/*",
+      "*://gist.githubusercontent.com/*"
+    ],
+    "entry": "resolve.js",
+    "timeoutMs": 25000,
+    "settings": [
+      {
+        "key": "preferred",
+        "title": "加速源",
+        "description": "自动 = 每次下载前并行测速，选最快且可用的源；固定某源后若其不可用仍会回退到其他可用源",
+        "type": "string",
+        "widget": "select",
+        "options": [
+          {
+            "value": "auto",
+            "label": "自动（测速优选）"
+          },
+          {
+            "value": "jsdelivr",
+            "label": "jsDelivr CDN"
+          },
+          {
+            "value": "fastgit",
+            "label": "FastGit（gh-proxy）"
+          },
+          {
+            "value": "direct",
+            "label": "直连（禁用加速）"
+          }
+        ],
+        "default": "auto"
+      },
+      {
+        "key": "extraProxies",
+        "title": "附加 gh-proxy 加速源",
+        "description": "每行一个 https:// 前缀（gh-proxy 风格，完整 GitHub 链接直接拼在其后），自动参与测速，例如 https://ghproxy.net/",
+        "type": "string",
+        "widget": "textarea",
+        "default": ""
+      },
+      {
+        "key": "verbose",
+        "title": "详细日志",
+        "description": "记录每个加速源的探测结果（状态码与耗时）",
+        "type": "boolean",
+        "widget": "toggle",
+        "default": "false"
+      }
+    ]
+  },
+  {
+    "id": "quark-share",
+    "identity": "myderr@quark-share",
+    "name": "Quark Share Resolver",
+    "version": "0.2.2",
+    "description": "浏览夸克网盘分享目录，选择所需文件后转存到指定目录并返回临时下载直链，完成后自动清理。",
+    "homepage": "https://github.com/myderr/fluxdown-quark-share",
+    "match": [
+      "*://pan.quark.cn/s/*"
+    ],
+    "entry": "resolver.js",
+    "timeoutMs": 30000,
+    "settings": [
+      {
+        "key": "cookie",
+        "title": "夸克网盘 Cookie",
+        "description": "粘贴 pan.quark.cn 登录后的完整 Cookie（支持多行长文本）。解析、转存和清理统一使用此账号。",
+        "type": "string",
+        "widget": "textarea",
+        "required": true,
+        "localizations": {
+          "zh": {
+            "title": "夸克网盘 Cookie",
+            "description": "粘贴 pan.quark.cn 登录后的完整 Cookie（支持多行长文本）。解析、转存和清理统一使用此账号。"
+          },
+          "en": {
+            "title": "Quark Drive Cookie",
+            "description": "Paste the full Cookie from your signed-in pan.quark.cn session. Multiple lines are supported. This account is used to resolve links, save files, and clean up temporary copies."
+          }
+        }
+      },
+      {
+        "key": "targetFolderId",
+        "title": "目标目录 ID",
+        "description": "开始转存前需填写预先创建的目标目录 fid，根目录为 0。",
+        "type": "string",
+        "widget": "text",
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "required": false,
+        "localizations": {
+          "zh": {
+            "title": "目标目录 ID",
+            "description": "开始转存前需填写预先创建的目标目录 fid，根目录为 0。"
+          },
+          "en": {
+            "title": "Destination folder ID",
+            "description": "Enter the fid of an existing Quark folder before saving files. Use 0 for the root folder."
+          }
+        }
+      },
+      {
+        "key": "maxFiles",
+        "title": "最多列出文件数",
+        "description": "预览时最多列出当前分享目录中的多少个直属文件，不递归子文件夹。",
+        "type": "number",
+        "widget": "number",
+        "min": 1,
+        "max": 1000,
+        "default": "200",
+        "required": true,
+        "localizations": {
+          "zh": {
+            "title": "最多列出文件数",
+            "description": "预览时最多列出当前分享目录中的多少个直属文件，不递归子文件夹。"
+          },
+          "en": {
+            "title": "Maximum files to display",
+            "description": "Limit the number of files shown from the current shared folder. Subfolders are not scanned recursively."
+          }
+        }
+      },
+      {
+        "key": "cleanupIntervalHours",
+        "title": "后台清理间隔（小时）",
+        "description": "定期清理失败或被取消后残留的夸克临时转存文件。",
+        "type": "number",
+        "widget": "number",
+        "min": 1,
+        "max": 168,
+        "default": "6",
+        "required": true,
+        "localizations": {
+          "zh": {
+            "title": "后台清理间隔（小时）",
+            "description": "定期清理失败或被取消后残留的夸克临时转存文件。"
+          },
+          "en": {
+            "title": "Background cleanup interval (hours)",
+            "description": "How often to check for temporary Quark copies left behind by failed or canceled downloads."
+          }
+        }
+      }
+    ],
+    "pageScripts": [
+      {
+        "id": "share-download",
+        "matches": [
+          "https://pan.quark.cn/s/*"
+        ],
+        "js": [
+          "page-download.js"
+        ],
+        "runAt": "document_idle"
+      }
+    ]
+  },
+  {
+    "id": "accountdl",
+    "identity": "accountdl@accountdl",
+    "name": "账号直链",
+    "version": "0.1.0",
+    "description": "用你在浏览器里已登录的账号，把百度网盘、115、夸克、123 云盘、蓝奏云分享，哔哩哔哩视频，Pixiv 作品，知网论文解析为直链下载。",
+    "homepage": "https://github.com/zerx-lab/fluxdown-plugin-accountdl",
+    "match": [
+      "https://pan.baidu.com/__accountdl/baidu*",
+      "https://pan.quark.cn/__accountdl/quark*",
+      "https://123pan.com/__accountdl/pan123*",
+      "https://*.123pan.com/__accountdl/pan123*",
+      "https://123pan.cn/__accountdl/pan123*",
+      "https://*.123pan.cn/__accountdl/pan123*",
+      "https://123684.com/__accountdl/pan123*",
+      "https://*.123684.com/__accountdl/pan123*",
+      "https://123865.com/__accountdl/pan123*",
+      "https://*.123865.com/__accountdl/pan123*",
+      "https://123912.com/__accountdl/pan123*",
+      "https://*.123912.com/__accountdl/pan123*",
+      "https://123592.com/__accountdl/pan123*",
+      "https://*.123592.com/__accountdl/pan123*",
+      "https://123295.com/__accountdl/pan123*",
+      "https://*.123295.com/__accountdl/pan123*",
+      "https://123278.com/__accountdl/pan123*",
+      "https://*.123278.com/__accountdl/pan123*",
+      "https://115.com/__accountdl/pan115*",
+      "*://*.lanzoub.com/*",
+      "*://*.lanzouc.com/*",
+      "*://*.lanzoue.com/*",
+      "*://*.lanzouf.com/*",
+      "*://*.lanzoug.com/*",
+      "*://*.lanzouh.com/*",
+      "*://*.lanzoui.com/*",
+      "*://*.lanzouj.com/*",
+      "*://*.lanzouk.com/*",
+      "*://*.lanzoul.com/*",
+      "*://*.lanzoum.com/*",
+      "*://*.lanzouo.com/*",
+      "*://*.lanzoup.com/*",
+      "*://*.lanzouq.com/*",
+      "*://*.lanzout.com/*",
+      "*://*.lanzouu.com/*",
+      "*://*.lanzouv.com/*",
+      "*://*.lanzouw.com/*",
+      "*://*.lanzoux.com/*",
+      "*://*.lanzouy.com/*",
+      "*://*.lanzb.com/*",
+      "*://*.lanze.com/*",
+      "*://*.lanzf.com/*",
+      "*://*.lanzh.com/*",
+      "*://*.lanzi.com/*",
+      "*://*.lanzj.com/*",
+      "*://*.lanzl.com/*",
+      "*://*.lanzm.com/*",
+      "*://*.lanzn.com/*",
+      "*://*.lanzo.com/*",
+      "*://*.lanzp.com/*",
+      "*://*.lanzq.com/*",
+      "*://*.lanzt.com/*",
+      "*://*.lanzv.com/*",
+      "*://*.lanzw.com/*",
+      "*://*.lanzx.com/*",
+      "*://*.lanzy.com/*",
+      "*://*.lanpw.com/*",
+      "*://www.bilibili.com/video/*",
+      "*://www.bilibili.com/bangumi/play/*",
+      "*://m.bilibili.com/video/*",
+      "*://bilibili.com/video/*",
+      "*://bilibili.com/bangumi/play/*",
+      "*://www.pixiv.net/artworks/*",
+      "*://www.pixiv.net/*/artworks/*",
+      "*://pixiv.net/artworks/*",
+      "*://pixiv.net/*/artworks/*"
+    ],
+    "entry": "resolve.js",
+    "timeoutMs": 30000,
+    "settings": [
+      {
+        "key": "bilibiliQuality",
+        "title": "哔哩哔哩画质",
+        "description": "「最高」不含 HDR 与杜比视界；「每次询问」会列出全部画质与编码供选择；账号没有的画质自动降级。",
+        "type": "string",
+        "widget": "select",
+        "default": "best",
+        "options": [
+          {
+            "value": "best",
+            "label": "最高可用"
+          },
+          {
+            "value": "2160",
+            "label": "最高 4K"
+          },
+          {
+            "value": "1080",
+            "label": "最高 1080P"
+          },
+          {
+            "value": "720",
+            "label": "最高 720P"
+          },
+          {
+            "value": "480",
+            "label": "最高 480P"
+          },
+          {
+            "value": "360",
+            "label": "最高 360P"
+          },
+          {
+            "value": "ask",
+            "label": "每次询问"
+          }
+        ]
+      },
+      {
+        "key": "bilibiliCodec",
+        "title": "哔哩哔哩视频编码",
+        "description": "同一画质下优先的编码。AVC 兼容性最好；HEVC / AV1 体积更小但需要播放器支持；该编码没有时自动换其他编码。",
+        "type": "string",
+        "widget": "select",
+        "default": "avc",
+        "options": [
+          {
+            "value": "avc",
+            "label": "AVC（兼容性最好）"
+          },
+          {
+            "value": "hevc",
+            "label": "HEVC"
+          },
+          {
+            "value": "av1",
+            "label": "AV1"
+          }
+        ]
+      },
+      {
+        "key": "bilibiliAudio",
+        "title": "哔哩哔哩音频",
+        "description": "「尽量最好」优先 Hi-Res（FLAC）、杜比全景声，需要大会员；合并为 mp4 时若 ffmpeg 不支持该音频，宿主会转成 192k AAC。",
+        "type": "string",
+        "widget": "select",
+        "default": "standard",
+        "options": [
+          {
+            "value": "standard",
+            "label": "普通（AAC，兼容性最好）"
+          },
+          {
+            "value": "best",
+            "label": "尽量最好（Hi-Res / 杜比）"
+          }
+        ]
+      }
+    ],
+    "pageScripts": [
+      {
+        "id": "baidu",
+        "matches": [
+          "https://pan.baidu.com/s/*",
+          "https://pan.baidu.com/share/init*",
+          "https://pan.baidu.com/wap/init*",
+          "https://yun.baidu.com/s/*",
+          "https://yun.baidu.com/share/init*",
+          "https://yun.baidu.com/wap/init*"
+        ],
+        "js": [
+          "page/baidu.js"
+        ],
+        "runAt": "document_idle"
+      },
+      {
+        "id": "quark",
+        "matches": [
+          "https://pan.quark.cn/s/*"
+        ],
+        "js": [
+          "page/quark.js"
+        ],
+        "runAt": "document_idle"
+      },
+      {
+        "id": "pan123",
+        "matches": [
+          "*://*.123pan.com/s/*",
+          "*://*.123pan.com/ps/*",
+          "*://*.123pan.com/123pan/*",
+          "*://*.123pan.cn/s/*",
+          "*://*.123pan.cn/ps/*",
+          "*://*.123pan.cn/123pan/*",
+          "*://*.123684.com/s/*",
+          "*://*.123865.com/s/*",
+          "*://*.123912.com/s/*",
+          "*://*.123592.com/s/*"
+        ],
+        "js": [
+          "page/pan123.js"
+        ],
+        "runAt": "document_idle"
+      },
+      {
+        "id": "pan115",
+        "matches": [
+          "*://115.com/s/*",
+          "*://115cdn.com/s/*",
+          "*://anxia.com/s/*"
+        ],
+        "js": [
+          "page/pan115.js"
+        ],
+        "runAt": "document_idle"
+      },
+      {
+        "id": "lanzou",
+        "matches": [
+          "*://*.lanzoub.com/*",
+          "*://*.lanzouc.com/*",
+          "*://*.lanzoue.com/*",
+          "*://*.lanzouf.com/*",
+          "*://*.lanzoug.com/*",
+          "*://*.lanzouh.com/*",
+          "*://*.lanzoui.com/*",
+          "*://*.lanzouj.com/*",
+          "*://*.lanzouk.com/*",
+          "*://*.lanzoul.com/*",
+          "*://*.lanzoum.com/*",
+          "*://*.lanzouo.com/*",
+          "*://*.lanzoup.com/*",
+          "*://*.lanzouq.com/*",
+          "*://*.lanzout.com/*",
+          "*://*.lanzouu.com/*",
+          "*://*.lanzouv.com/*",
+          "*://*.lanzouw.com/*",
+          "*://*.lanzoux.com/*",
+          "*://*.lanzouy.com/*"
+        ],
+        "js": [
+          "page/lanzou.js"
+        ],
+        "runAt": "document_idle"
+      },
+      {
+        "id": "lanzou2",
+        "matches": [
+          "*://*.lanzb.com/*",
+          "*://*.lanze.com/*",
+          "*://*.lanzf.com/*",
+          "*://*.lanzh.com/*",
+          "*://*.lanzi.com/*",
+          "*://*.lanzj.com/*",
+          "*://*.lanzl.com/*",
+          "*://*.lanzm.com/*",
+          "*://*.lanzn.com/*",
+          "*://*.lanzo.com/*",
+          "*://*.lanzp.com/*",
+          "*://*.lanzq.com/*",
+          "*://*.lanzt.com/*",
+          "*://*.lanzv.com/*",
+          "*://*.lanzw.com/*",
+          "*://*.lanzx.com/*",
+          "*://*.lanzy.com/*",
+          "*://*.lanpw.com/*"
+        ],
+        "js": [
+          "page/lanzou.js"
+        ],
+        "runAt": "document_idle"
+      },
+      {
+        "id": "bilibili",
+        "matches": [
+          "*://www.bilibili.com/video/*",
+          "*://www.bilibili.com/bangumi/play/*"
+        ],
+        "js": [
+          "page/bilibili.js"
+        ],
+        "runAt": "document_idle"
+      },
+      {
+        "id": "pixiv",
+        "matches": [
+          "https://www.pixiv.net/*"
+        ],
+        "js": [
+          "page/pixiv.js"
+        ],
+        "runAt": "document_idle"
+      },
+      {
+        "id": "cnki",
+        "matches": [
+          "*://*.cnki.net/kcms2/article/abstract*",
+          "*://*.cnki.net/kcms/detail/*"
+        ],
+        "js": [
+          "page/cnki.js"
+        ],
+        "runAt": "document_idle"
+      }
+    ]
+  },
+  {
+    "id": "musicdl",
+    "identity": "musicdl@musicdl",
+    "name": "全网音乐下载",
+    "version": "0.1.1",
+    "description": "搜索歌曲或粘贴网易云 / QQ / 酷狗 / 酷我音乐的歌曲链接，一键下载音乐；在音乐网站的歌曲页直接下载。音源来自煎饼搜（jbsou.cn），可用性以该站为准。",
+    "homepage": "https://github.com/zerx-lab/fluxdown-plugin-musicdl",
+    "match": [
+      "*://www.jbsou.cn/?*",
+      "*://music.163.com/*song*",
+      "*://y.music.163.com/m/song*",
+      "*://y.qq.com/n/ryqq/songDetail/*",
+      "*://y.qq.com/n/yqq/song/*",
+      "*://i.y.qq.com/v8/playsong.html*",
+      "*://www.kugou.com/song/*",
+      "*://www.kuwo.cn/play_detail/*"
+    ],
+    "entry": "resolve.js",
+    "timeoutMs": 30000,
+    "settings": []
+  },
+  {
+    "id": "bilibili",
+    "identity": "gulanthys@bilibili-bangumi",
+    "name": "哔哩哔哩",
+    "version": "1.2.0",
+    "description": "支持哔哩哔哩视频、番剧与 UP 主订阅解析，可列出画质、音轨、字幕与弹幕。",
+    "homepage": "https://github.com/gulanthys/fluxdown-bilibili-bangumi",
+    "match": [
+      "*://www.bilibili.com/bangumi/play/ss*",
+      "*://www.bilibili.com/bangumi/play/ep*",
+      "*://bilibili.com/bangumi/play/ss*",
+      "*://bilibili.com/bangumi/play/ep*",
+      "*://m.bilibili.com/bangumi/play/ss*",
+      "*://m.bilibili.com/bangumi/play/ep*",
+      "*://www.bilibili.com/bangumi/media/md*",
+      "*://bilibili.com/bangumi/media/md*",
+      "*://m.bilibili.com/bangumi/media/md*",
+      "*://www.bilibili.com/bangumi/play?*season_id=*",
+      "*://www.bilibili.com/bangumi/play/?*season_id=*",
+      "*://bilibili.com/bangumi/play?*season_id=*",
+      "*://bilibili.com/bangumi/play/?*season_id=*",
+      "*://m.bilibili.com/bangumi/play?*season_id=*",
+      "*://m.bilibili.com/bangumi/play/?*season_id=*",
+      "*://www.bilibili.com/bangumi/media?*season_id=*",
+      "*://www.bilibili.com/bangumi/media/?*season_id=*",
+      "*://bilibili.com/bangumi/media?*season_id=*",
+      "*://bilibili.com/bangumi/media/?*season_id=*",
+      "*://m.bilibili.com/bangumi/media?*season_id=*",
+      "*://m.bilibili.com/bangumi/media/?*season_id=*",
+      "*://www.bilibili.com/video/BV*",
+      "*://www.bilibili.com/video/av*",
+      "*://bilibili.com/video/BV*",
+      "*://bilibili.com/video/av*",
+      "*://m.bilibili.com/video/BV*",
+      "*://m.bilibili.com/video/av*",
+      "*://b23.tv/*",
+      "*://bili2233.cn/*"
+    ],
+    "entry": "resolve.js",
+    "timeoutMs": 30000,
+    "settings": [
+      {
+        "key": "cookies",
+        "title": "导入 Bilibili Cookie",
+        "description": "解析时使用的登录态。支持浏览器 Cookie 头或 Netscape cookies.txt；保存后会用于后续解析与下载。",
+        "localizations": {
+          "en": {
+            "title": "Import Bilibili Cookies",
+            "description": "Authentication used during parsing. Accepts a browser Cookie header or Netscape cookies.txt; saved for subsequent parsing and downloads."
+          },
+          "zh-Hans": {
+            "title": "导入 Bilibili Cookie",
+            "description": "解析时使用的登录态。支持浏览器 Cookie 头或 Netscape cookies.txt；保存后会用于后续解析与下载。"
+          }
+        },
+        "type": "string",
+        "widget": "textarea",
+        "default": ""
+      },
+      {
+        "key": "includeExtras",
+        "title": "包含番外与花絮",
+        "description": "番剧清单与番剧订阅共用：关闭时只列正片并排除预告；开启后同时列出番外、预告、PV、采访等分区。",
+        "localizations": {
+          "en": {
+            "title": "Include Extras and Behind-the-Scenes",
+            "description": "Shared by series lists and series subscriptions. When off, lists only main episodes and excludes previews; when on, also lists extras, previews, PVs, interviews, and other sections."
+          },
+          "zh-Hans": {
+            "title": "包含番外与花絮",
+            "description": "番剧清单与番剧订阅共用：关闭时只列正片并排除预告；开启后同时列出番外、预告、PV、采访等分区。"
+          }
+        },
+        "type": "boolean",
+        "widget": "toggle",
+        "default": "false"
+      },
+      {
+        "key": "highestQualityOnly",
+        "title": "优先最高画质",
+        "description": "番剧清单及番剧、UP 主订阅共用：每个视频只展示最高可用画质。",
+        "localizations": {
+          "en": {
+            "title": "Prefer Highest Quality",
+            "description": "Shared by series lists and series/UP creator subscriptions: show only the highest available quality for each video."
+          },
+          "zh-Hans": {
+            "title": "优先最高画质",
+            "description": "番剧清单及番剧、UP 主订阅共用：每个视频只展示最高可用画质。"
+          }
+        },
+        "type": "boolean",
+        "widget": "toggle",
+        "default": "false"
+      },
+      {
+        "key": "quality",
+        "title": "默认画质",
+        "description": "普通链接的默认画质，同时作为番剧和 UP 主订阅的画质上限。订阅不支持仅音频，选择仅音频时按最佳画质处理。",
+        "localizations": {
+          "en": {
+            "title": "Default Quality",
+            "description": "Default quality for regular links and quality ceiling for series and UP creator subscriptions. Subscriptions do not support audio-only; audio-only is treated as best quality."
+          },
+          "zh-Hans": {
+            "title": "默认画质",
+            "description": "普通链接的默认画质，同时作为番剧和 UP 主订阅的画质上限。订阅不支持仅音频，选择仅音频时按最佳画质处理。"
+          }
+        },
+        "type": "string",
+        "widget": "select",
+        "options": [
+          {
+            "value": "best",
+            "label": "最佳画质",
+            "localizations": {
+              "en": "Best quality",
+              "zh-Hans": "最佳画质"
+            }
+          },
+          {
+            "value": "2160",
+            "label": "不超过 2160p",
+            "localizations": {
+              "en": "Up to 2160p",
+              "zh-Hans": "不超过 2160p"
+            }
+          },
+          {
+            "value": "1440",
+            "label": "不超过 1440p",
+            "localizations": {
+              "en": "Up to 1440p",
+              "zh-Hans": "不超过 1440p"
+            }
+          },
+          {
+            "value": "1080",
+            "label": "不超过 1080p",
+            "localizations": {
+              "en": "Up to 1080p",
+              "zh-Hans": "不超过 1080p"
+            }
+          },
+          {
+            "value": "720",
+            "label": "不超过 720p",
+            "localizations": {
+              "en": "Up to 720p",
+              "zh-Hans": "不超过 720p"
+            }
+          },
+          {
+            "value": "480",
+            "label": "不超过 480p",
+            "localizations": {
+              "en": "Up to 480p",
+              "zh-Hans": "不超过 480p"
+            }
+          },
+          {
+            "value": "audio",
+            "label": "仅音频",
+            "localizations": {
+              "en": "Audio only",
+              "zh-Hans": "仅音频"
+            }
+          }
+        ],
+        "default": "best"
+      },
+      {
+        "key": "videoCodec",
+        "title": "视频编码偏好",
+        "description": "在同一画质优先选择指定编码；不可用时使用该画质的兼容编码。",
+        "localizations": {
+          "en": {
+            "title": "Video Codec Preference",
+            "description": "Prefer the selected codec at the same quality; use a compatible codec at that quality if unavailable."
+          },
+          "zh-Hans": {
+            "title": "视频编码偏好",
+            "description": "在同一画质优先选择指定编码；不可用时使用该画质的兼容编码。"
+          }
+        },
+        "type": "string",
+        "widget": "select",
+        "default": "auto",
+        "options": [
+          {
+            "value": "auto",
+            "label": "自动（优先 AVC）",
+            "localizations": {
+              "en": "Auto (prefer AVC)",
+              "zh-Hans": "自动（优先 AVC）"
+            }
+          },
+          {
+            "value": "avc",
+            "label": "AVC (H.264)",
+            "localizations": {
+              "en": "AVC (H.264)",
+              "zh-Hans": "AVC (H.264)"
+            }
+          },
+          {
+            "value": "hevc",
+            "label": "HEVC (H.265)",
+            "localizations": {
+              "en": "HEVC (H.265)",
+              "zh-Hans": "HEVC (H.265)"
+            }
+          },
+          {
+            "value": "av1",
+            "label": "AV1",
+            "localizations": {
+              "en": "AV1",
+              "zh-Hans": "AV1"
+            }
+          }
+        ]
+      },
+      {
+        "key": "audioQuality",
+        "title": "音质偏好",
+        "description": "适用于音画合并与仅音频；所选档位没有开放时优先降到最近可用档。",
+        "localizations": {
+          "en": {
+            "title": "Audio Quality Preference",
+            "description": "For muxed audio/video and audio-only; if the selected tier is unavailable, prefer the nearest available tier."
+          },
+          "zh-Hans": {
+            "title": "音质偏好",
+            "description": "适用于音画合并与仅音频；所选档位没有开放时优先降到最近可用档。"
+          }
+        },
+        "type": "string",
+        "widget": "select",
+        "default": "auto",
+        "options": [
+          {
+            "value": "auto",
+            "label": "自动（最高普通音质）",
+            "localizations": {
+              "en": "Auto (highest standard quality)",
+              "zh-Hans": "自动（最高普通音质）"
+            }
+          },
+          {
+            "value": "30216",
+            "label": "64K",
+            "localizations": {
+              "en": "64K",
+              "zh-Hans": "64K"
+            }
+          },
+          {
+            "value": "30232",
+            "label": "132K",
+            "localizations": {
+              "en": "132K",
+              "zh-Hans": "132K"
+            }
+          },
+          {
+            "value": "30280",
+            "label": "192K",
+            "localizations": {
+              "en": "192K",
+              "zh-Hans": "192K"
+            }
+          },
+          {
+            "value": "30250",
+            "label": "杜比音频",
+            "localizations": {
+              "en": "Dolby Audio",
+              "zh-Hans": "杜比音频"
+            }
+          },
+          {
+            "value": "30251",
+            "label": "Hi-Res / FLAC",
+            "localizations": {
+              "en": "Hi-Res / FLAC",
+              "zh-Hans": "Hi-Res / FLAC"
+            }
+          }
+        ]
+      },
+      {
+        "key": "cover",
+        "title": "列出封面",
+        "type": "boolean",
+        "widget": "toggle",
+        "default": "false",
+        "localizations": {
+          "en": {
+            "title": "List Covers"
+          },
+          "zh-Hans": {
+            "title": "列出封面"
+          }
+        }
+      },
+      {
+        "key": "subtitles",
+        "title": "列出人工字幕 (SRT)",
+        "type": "boolean",
+        "widget": "toggle",
+        "default": "false",
+        "localizations": {
+          "en": {
+            "title": "List Human Subtitles (SRT)"
+          },
+          "zh-Hans": {
+            "title": "列出人工字幕 (SRT)"
+          }
+        }
+      },
+      {
+        "key": "aiSubtitles",
+        "title": "列出 B 站 AI 字幕 (SRT)",
+        "type": "boolean",
+        "widget": "toggle",
+        "default": "false",
+        "localizations": {
+          "en": {
+            "title": "List Bilibili AI Subtitles (SRT)"
+          },
+          "zh-Hans": {
+            "title": "列出 B 站 AI 字幕 (SRT)"
+          }
+        }
+      },
+      {
+        "key": "danmakuXml",
+        "title": "列出 XML 弹幕",
+        "type": "boolean",
+        "widget": "toggle",
+        "default": "false",
+        "localizations": {
+          "en": {
+            "title": "List XML Danmaku"
+          },
+          "zh-Hans": {
+            "title": "列出 XML 弹幕"
+          }
+        }
+      },
+      {
+        "key": "danmakuAss",
+        "title": "列出 ASS 弹幕",
+        "type": "boolean",
+        "widget": "toggle",
+        "default": "false",
+        "localizations": {
+          "en": {
+            "title": "List ASS Danmaku"
+          },
+          "zh-Hans": {
+            "title": "列出 ASS 弹幕"
+          }
+        }
+      }
+    ]
+  }
+]
