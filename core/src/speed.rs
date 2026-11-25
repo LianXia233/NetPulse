@@ -83,6 +83,8 @@ struct SpeedRoute {
     endpoint: String,
     ip: String,
     dns: String,
+    /// 该 IP 由第几台 DNS 解析得到；`usize::MAX` 表示没解析出来（交给系统解析）。
+    dns_idx: usize,
 }
 
 /// 每个测速端点用「设置里的全部 DNS」并发解析，A/AAAA 都取；
@@ -117,25 +119,36 @@ fn build_routes(
             let ip_mode = ip_mode.to_string();
             handles.push(thread::spawn(move || {
                 let answers = crate::dns::query_all(&host, &servers, qtype, timeout);
-                (endpoint, answers, ip_mode)
+                // 把每条记录归因到具体 DNS，线程才能只拿“自己那台”解析出的 IP。
+                let tagged: Vec<(crate::dns::Answer, usize)> = answers
+                    .into_iter()
+                    .map(|a| {
+                        let idx = crate::dns::index_of(&servers, &a.server);
+                        (a, idx)
+                    })
+                    .collect();
+                (endpoint, tagged, ip_mode)
             }));
         }
     }
     let mut by_endpoint: HashMap<String, Vec<SpeedRoute>> = HashMap::new();
     for h in handles {
         if let Ok((endpoint, answers, ip_mode)) = h.join() {
-            for a in answers {
+            for (a, dns_idx) in answers {
                 for ip in a.ips {
                     if (ip_mode == "v4" && !ip.is_ipv4()) || (ip_mode == "v6" && !ip.is_ipv6()) {
                         continue;
                     }
                     let ip = ip.to_string();
                     let list = by_endpoint.entry(endpoint.clone()).or_default();
-                    if !list.iter().any(|r| r.ip == ip) {
+                    // 按 (IP, DNS) 去重：两台 DNS 常解析到同一个 CDN IP，
+                    // 保留各自的归属，线程才能真正按 DNS 分组。
+                    if !list.iter().any(|r| r.ip == ip && r.dns_idx == dns_idx) {
                         list.push(SpeedRoute {
                             endpoint: endpoint.clone(),
                             ip,
                             dns: a.server.clone(),
+                            dns_idx,
                         });
                     }
                 }
@@ -151,11 +164,42 @@ fn build_routes(
                 endpoint: endpoint.clone(),
                 ip: String::new(),
                 dns: "自动".into(),
+                dns_idx: usize::MAX,
             });
         }
         groups.push(group);
     }
     groups
+}
+
+/// 组内挑选路由：先只挑「自己首选 DNS」解析出的节点，按 `rank` 错开起点，
+/// 组内轮完一轮后再滑到其它 DNS 的节点兜底，保证不同 worker 真的分散在不同 DNS 上。
+fn pick_route(
+    group: &[SpeedRoute],
+    pref: Option<usize>,
+    rank: usize,
+    attempt: usize,
+) -> &SpeedRoute {
+    let n = group.len();
+    if n == 1 {
+        return &group[0];
+    }
+    let Some(p) = pref else {
+        return &group[(rank + attempt) % n];
+    };
+    let own: Vec<usize> = (0..n).filter(|&i| group[i].dns_idx == p).collect();
+    if !own.is_empty() {
+        if attempt < own.len() {
+            return &group[own[(rank + attempt) % own.len()]];
+        }
+        let rest: Vec<usize> = (0..n).filter(|&i| group[i].dns_idx != p).collect();
+        if !rest.is_empty() {
+            return &group[rest[(rank + attempt) % rest.len()]];
+        }
+        return &group[own[(rank + attempt) % own.len()]];
+    }
+    let rest: Vec<usize> = (0..n).filter(|&i| group[i].dns_idx != p).collect();
+    &group[rest[(rank + attempt) % rest.len().max(1)]]
 }
 
 fn run(p: SpeedParams, task: Arc<Task>) {
@@ -180,6 +224,20 @@ fn run(p: SpeedParams, task: Arc<Task>) {
     let errors = Arc::new(AtomicU64::new(0));
     let active = Arc::new(AtomicU64::new(0));
     let workers = p.workers.clamp(1, 32);
+    // 参与分流的 DNS 列表：worker i 固定首选第 i % n 台。
+    // 用下标列表而不是数量，某台 DNS 完全失败时分组也不会错位。
+    let dns_used: Arc<Vec<usize>> = Arc::new({
+        let mut idxs: Vec<usize> = routes
+            .iter()
+            .flatten()
+            .filter(|r| r.dns_idx != usize::MAX)
+            .map(|r| r.dns_idx)
+            .collect();
+        idxs.sort_unstable();
+        idxs.dedup();
+        idxs
+    });
+    let dns_total = dns_used.len();
     let deadline = Instant::now() + Duration::from_millis(p.duration_ms.clamp(1000, 600000));
     let limit = p.total_limit_bytes;
 
@@ -195,10 +253,11 @@ fn run(p: SpeedParams, task: Arc<Task>) {
         let mode = p.mode.clone();
         let buffer = p.buffer_kb.clamp(4, 4096) * 1024;
         let bind_if = bind_if.clone();
+        let dns_used = dns_used.clone();
         handles.push(thread::spawn(move || {
             worker(
                 i, routes, mode, buffer, cache, bytes, errors, active, task, cancel, deadline,
-                limit, bind_ip, bind_if,
+                limit, bind_ip, bind_if, dns_used,
             )
         }));
     }
@@ -278,6 +337,8 @@ fn run(p: SpeedParams, task: Arc<Task>) {
         "duration_ms": end_time.duration_since(start).as_millis(),
         "errors": errors.load(Ordering::Relaxed),
         "workers": workers,
+        "dns_total": dns_total,
+        "dns_servers": p.dns_servers,
         "cancelled": cancelled,
         "endpoints": p.endpoints,
     });
@@ -314,16 +375,26 @@ fn worker(
     limit: u64,
     bind_ip: Option<IpAddr>,
     bind_if: Arc<String>,
+    dns_used: Arc<Vec<usize>>,
 ) {
     let endpoint_count = routes.len().max(1);
+    // 每条线程固定一台首选 DNS，多 DNS 才会被真正用满而不是全挤在第一台。
+    let pref = if dns_used.is_empty() {
+        None
+    } else {
+        Some(dns_used[idx % dns_used.len()])
+    };
     let first = routes
         .get(idx % endpoint_count)
         .and_then(|g| g.first())
         .map(|r| r.endpoint.clone())
         .unwrap_or_default();
-    task.emit(json!({"type": "worker", "idx": idx, "endpoint": first, "state": "start"}));
+    task.emit(json!({
+        "type": "worker", "idx": idx, "endpoint": first, "state": "start", "dns_pref": pref
+    }));
     let mut seed = (Instant::now().elapsed().as_nanos() as u64) ^ ((idx as u64) << 32) ^ 0x9E3779B97F4A7C15;
-    let mut reported_route = false;
+    // 记录上一次上报的出口，路由变化（换 DNS / 换 IP）时再发一条事件。
+    let mut last_route: Option<(String, String)> = None;
     let body = if mode == "upload" {
         let len = 4 * 1024 * 1024;
         let mut v = vec![0u8; len];
@@ -343,13 +414,22 @@ fn worker(
     {
         let endpoint_index = (idx + attempt) % endpoint_count;
         let group = &routes[endpoint_index];
-        let route_index = (idx / endpoint_count + attempt) % group.len().max(1);
-        let route = group[route_index].clone();
+        // 同一台 DNS 下的第几条线程，用来错开组内起始节点。
+        let rank = idx / endpoint_count / dns_used.len().max(1);
+        let route = pick_route(group, pref, rank, attempt).clone();
         let endpoint = route.endpoint.clone();
         attempt = attempt.wrapping_add(1);
         active.fetch_add(1, Ordering::Relaxed);
         let result = if mode == "upload" {
-            upload_once(&route, body.as_ref().unwrap(), &cache, &bytes, bind_ip, bind_if.as_str())
+            upload_once(
+                &route,
+                body.as_ref().unwrap(),
+                &cache,
+                &bytes,
+                bind_ip,
+                bind_if.as_str(),
+                pref,
+            )
         } else {
             download_once(
                 idx,
@@ -360,9 +440,10 @@ fn worker(
                 &cancel,
                 &mut seed,
                 &task,
-                &mut reported_route,
+                &mut last_route,
                 bind_ip,
                 bind_if.as_str(),
+                pref,
             )
         };
         active.fetch_sub(1, Ordering::Relaxed);
@@ -393,9 +474,10 @@ fn download_once(
     cancel: &Arc<AtomicBool>,
     seed: &mut u64,
     task: &Arc<Task>,
-    reported_route: &mut bool,
+    last_route: &mut Option<(String, String)>,
     bind_ip: Option<IpAddr>,
     bind_if: &str,
+    dns_pref: Option<usize>,
 ) -> Result<(), String> {
     let offset = rnd(seed) % 1_000_000_000;
     let mut req = Req::new("GET", &route.endpoint);
@@ -405,6 +487,7 @@ fn download_once(
     if !route.dns.is_empty() {
         req.pin_dns = Some(route.dns.clone());
     }
+    req.dns_pref = dns_pref;
     req.bind_ip = bind_ip;
     req.bind_if = bind_if.to_string();
     req.read_timeout = Duration::from_millis(2500);
@@ -424,6 +507,7 @@ fn download_once(
         if !route.dns.is_empty() {
             plain.pin_dns = Some(route.dns.clone());
         }
+        plain.dns_pref = dns_pref;
         plain.bind_ip = bind_ip;
         plain.bind_if = bind_if.to_string();
         plain.read_timeout = Duration::from_millis(2500);
@@ -432,13 +516,7 @@ fn download_once(
             .headers
             .push(("Cache-Control".into(), "no-cache".into()));
         let mut r = send(&plain, cache)?;
-        if !*reported_route {
-            *reported_route = true;
-            task.emit(json!({
-                "type": "route", "idx": idx, "endpoint": route.endpoint,
-                "ip": r.ip, "dns_ms": r.dns_ms, "dns_server": r.dns_server, "status": r.status
-            }));
-        }
+        report_route(idx, route, &r, task, last_route, dns_pref);
         if r.status != 200 && r.status != 206 {
             return Err(format!("HTTP {}", r.status));
         }
@@ -458,13 +536,7 @@ fn download_once(
             bytes.fetch_add(n as u64, Ordering::Relaxed);
         }
     }
-    if !*reported_route {
-        *reported_route = true;
-        task.emit(json!({
-            "type": "route", "idx": idx, "endpoint": route.endpoint,
-            "ip": resp.ip, "dns_ms": resp.dns_ms, "dns_server": resp.dns_server, "status": resp.status
-        }));
-    }
+    report_route(idx, route, &resp, task, last_route, dns_pref);
     if status != 200 && status != 206 {
         return Err(format!("HTTP {}", status));
     }
@@ -486,6 +558,27 @@ fn download_once(
     }
 }
 
+/// 上报某条线程当前的出口（IP + 实际命中的 DNS），路由变化时才发事件。
+fn report_route(
+    idx: usize,
+    route: &SpeedRoute,
+    r: &crate::http::Response,
+    task: &Arc<Task>,
+    last: &mut Option<(String, String)>,
+    dns_pref: Option<usize>,
+) {
+    let now = (r.ip.clone(), r.dns_server.clone());
+    if last.as_ref() == Some(&now) {
+        return;
+    }
+    *last = Some(now);
+    task.emit(json!({
+        "type": "route", "idx": idx, "endpoint": route.endpoint,
+        "ip": r.ip, "dns_ms": r.dns_ms, "dns_server": r.dns_server, "status": r.status,
+        "dns_pref": dns_pref, "cdn_ip": route.ip
+    }));
+}
+
 fn upload_once(
     route: &SpeedRoute,
     body: &Arc<Vec<u8>>,
@@ -493,6 +586,7 @@ fn upload_once(
     bytes: &Arc<AtomicU64>,
     bind_ip: Option<IpAddr>,
     bind_if: &str,
+    dns_pref: Option<usize>,
 ) -> Result<(), String> {
     let mut req = Req::new("POST", &route.endpoint);
     if let Ok(ip) = route.ip.parse() {
@@ -501,6 +595,7 @@ fn upload_once(
     if !route.dns.is_empty() {
         req.pin_dns = Some(route.dns.clone());
     }
+    req.dns_pref = dns_pref;
     req.bind_ip = bind_ip;
     req.bind_if = bind_if.to_string();
     req.read_timeout = Duration::from_millis(2500);
@@ -533,3 +628,73 @@ fn upload_once(
     }
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn pick_route_prefers_own_dns() {
+        let group = vec![
+            SpeedRoute { endpoint: "e".into(), ip: "1.1.1.1".into(), dns: "a".into(), dns_idx: 0 },
+            SpeedRoute { endpoint: "e".into(), ip: "2.2.2.2".into(), dns: "b".into(), dns_idx: 1 },
+            SpeedRoute { endpoint: "e".into(), ip: "3.3.3.3".into(), dns: "a".into(), dns_idx: 0 },
+            SpeedRoute { endpoint: "e".into(), ip: String::new(), dns: "自动".into(), dns_idx: usize::MAX },
+        ];
+        // 首选 DNS 0 有两条节点：前两次尝试只在组内换，且按 rank 错开。
+        assert_eq!(pick_route(&group, Some(0), 0, 0).ip, "1.1.1.1");
+        assert_eq!(pick_route(&group, Some(0), 1, 0).ip, "3.3.3.3");
+        // 首选 DNS 1 只有一条：第一次命中，之后滑到其它 DNS 兜底。
+        assert_eq!(pick_route(&group, Some(1), 0, 0).ip, "2.2.2.2");
+        assert_ne!(pick_route(&group, Some(1), 0, 1).ip, "2.2.2.2");
+        // 没有自定义 DNS：整组轮转。
+        assert_eq!(pick_route(&group, None, 0, 3).ip, "");
+    }
+
+    /// 真实网络验证：多条 worker 会分散到不同 DNS。需要外网，默认跳过。
+    #[test]
+    #[ignore]
+    fn live_speed_spreads_across_dns() {
+        let r = start(json!({
+            "mode": "download",
+            "endpoints": ["https://proof.ovh.net/files/10Mb.dat"],
+            "dns_servers": ["223.5.5.5", "119.29.29.29"],
+            "workers": 4,
+            "duration_ms": 4000,
+            "sample_ms": 400,
+            "timeout_ms": 4000,
+        }))
+        .expect("测速应能启动");
+        let id = r["task_id"].as_str().unwrap().to_string();
+        thread::sleep(Duration::from_millis(2600));
+        let task = crate::get_task(&id).unwrap();
+        let events = task.events.lock().unwrap().clone();
+        let mut prefs = HashSet::new();
+        let mut servers = HashSet::new();
+        for e in &events {
+            if e["type"] == "route" {
+                if let Some(p) = e["dns_pref"].as_i64() {
+                    prefs.insert(p);
+                }
+                if let Some(s) = e["dns_server"].as_str() {
+                    servers.insert(s.to_string());
+                }
+            }
+        }
+        println!("dns_pref={:?} dns_server={:?}", prefs, servers);
+        assert!(!prefs.is_empty(), "应至少有一条连接上报出口");
+        assert!(prefs.len() >= 2 || servers.len() <= 1, "worker 应分散到多台 DNS");
+        // 等测速收尾，确保采样线程正常结束。
+        for _ in 0..40 {
+            if *task.status.lock().unwrap() != "running" {
+                break;
+            }
+            thread::sleep(Duration::from_millis(300));
+        }
+        let summary = task.summary.lock().unwrap().clone().unwrap_or(Value::Null);
+        println!("summary={}", summary);
+        assert!(summary["total_bytes"].as_u64().unwrap_or(0) > 0);
+        assert!(summary["dns_total"].as_u64().unwrap_or(0) >= 1);
+    }
+}

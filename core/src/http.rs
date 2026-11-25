@@ -196,6 +196,34 @@ impl ResolveCache {
     }
 
     pub fn resolve(&self, host: &str) -> Result<(Vec<IpAddr>, String, u128), String> {
+        self.resolve_inner(host, None)
+    }
+
+    /// 按「首选 DNS」解析：`pref` 为配置列表下标，表示这条连接优先用哪台 DNS。
+    ///
+    /// 语义是「强制优先 + 逐台兜底」：先只用首选 DNS；它超时/失败/无记录时
+    /// 按配置顺序换下一台，最后由 `resolve_inner` 兜底到系统解析。
+    /// 这样多线程下载/测速才能真正分散到不同 DNS，又不会因为一台 DNS 挂掉而失败。
+    pub fn resolve_pref(
+        &self,
+        host: &str,
+        pref: Option<usize>,
+    ) -> Result<(Vec<IpAddr>, String, u128), String> {
+        if let Some(start) = pref {
+            if self.servers.len() > 1 && self.dns_mode != "primary" {
+                if let Ok(r) = self.resolve_inner(host, Some(start)) {
+                    return Ok(r);
+                }
+            }
+        }
+        self.resolve_inner(host, None)
+    }
+
+    fn resolve_inner(
+        &self,
+        host: &str,
+        pref: Option<usize>,
+    ) -> Result<(Vec<IpAddr>, String, u128), String> {
         if let Ok(ip) = host.parse::<IpAddr>() {
             if self.ip_mode == "v4" && !ip.is_ipv4() {
                 return Err("当前连接方式仅允许 IPv4".into());
@@ -205,7 +233,12 @@ impl ResolveCache {
             }
             return Ok((vec![ip], "ip".to_string(), 0));
         }
-        if let Some(e) = self.map.lock().unwrap().get(host) {
+        // 每条链路各自缓存：worker 0 的解析结果不能顶掉 worker 1 的首选 DNS。
+        let key = match pref {
+            Some(start) => format!("{}#{}", host, start),
+            None => host.to_string(),
+        };
+        if let Some(e) = self.map.lock().unwrap().get(&key) {
             if e.at.elapsed().as_secs() < 300 {
                 return Ok((e.ips.clone(), e.server.clone(), e.ms));
             }
@@ -219,18 +252,28 @@ impl ResolveCache {
         let mut answers = Vec::new();
         if !self.servers.is_empty() {
             for qtype in qtypes {
-                if self.dns_mode == "primary" {
-                    for server in &self.servers {
-                        match dns::query(host, server, qtype, self.timeout) {
-                            Ok(a) => {
-                                answers.push(a);
-                                break;
+                match pref {
+                    // 单链路模式：首选 DNS 优先，逐台回退。
+                    Some(start) => match dns::query_ordered(host, &self.servers, qtype, self.timeout, start)
+                    {
+                        Ok(a) => answers.push(a),
+                        Err(e) => last = e,
+                    },
+                    None => {
+                        if self.dns_mode == "primary" {
+                            for server in &self.servers {
+                                match dns::query(host, server, qtype, self.timeout) {
+                                    Ok(a) => {
+                                        answers.push(a);
+                                        break;
+                                    }
+                                    Err(e) => last = e,
+                                }
                             }
-                            Err(e) => last = e,
+                        } else {
+                            answers.extend(dns::query_all(host, &self.servers, qtype, self.timeout));
                         }
                     }
-                } else {
-                    answers.extend(dns::query_all(host, &self.servers, qtype, self.timeout));
                 }
             }
         }
@@ -264,7 +307,7 @@ impl ResolveCache {
             }
             let server = servers_used.join(" / ");
             self.map.lock().unwrap().insert(
-                host.to_string(),
+                key,
                 CacheEntry { ips: ips.clone(), at: Instant::now(), server: server.clone(), ms: max_ms },
             );
             return Ok((ips, server, max_ms));
@@ -282,7 +325,7 @@ impl ResolveCache {
             });
             if !ips.is_empty() {
                 self.map.lock().unwrap().insert(
-                    host.to_string(),
+                    key,
                     CacheEntry { ips: ips.clone(), at: Instant::now(), server: "system".into(), ms: 0 },
                 );
                 return Ok((ips, "system".into(), 0));
@@ -331,6 +374,9 @@ pub struct Req {
     pub user_agent: String,
     pub pin_ip: Option<std::net::IpAddr>,
     pub pin_dns: Option<String>,
+    /// 首选 DNS 在配置列表中的下标；仅在没有 pin_ip 时生效，用于把不同线程
+    /// 分散到不同 DNS 服务器（失败自动逐台回退，最后回退系统解析）。
+    pub dns_pref: Option<usize>,
     pub bind_ip: Option<std::net::IpAddr>,
     pub bind_if: String,
     /// 请求体实际写出的字节回调，用于上传测速的实时速率采样。
@@ -350,6 +396,7 @@ impl Req {
             user_agent: "NetPulse/1.1".to_string(),
             pin_ip: None,
             pin_dns: None,
+            dns_pref: None,
             bind_ip: None,
             bind_if: String::new(),
             write_progress: None,
@@ -724,7 +771,8 @@ fn send_once(
 ) -> Result<Response, String> {
     let (ips, dns_server, dns_ms) = match req.pin_ip {
         Some(ip) => (vec![ip], req.pin_dns.clone().unwrap_or_else(|| "pin".into()), 0u128),
-        None => cache.resolve(&parsed.host)?,
+        // 未预解析到 IP（或全部 IP 都被跳过）时，用线程自己的首选 DNS 解析。
+        None => cache.resolve_pref(&parsed.host, req.dns_pref)?,
     };
     let mut last_err = String::from("连接失败");
     let mut tcp: Option<TcpStream> = None;

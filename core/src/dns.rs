@@ -442,6 +442,46 @@ pub fn query_all(host: &str, servers: &[String], qtype: u16, timeout: Duration) 
     slots.into_iter().flatten().collect()
 }
 
+/// 在服务器列表里定位某台 DNS 的下标（用于把解析结果归因到具体服务器）。
+/// 用规范化后的 key 比较，因此 `1.1.1.1` 与 `1.1.1.1:53` 视为同一台。
+pub fn index_of(servers: &[String], server: &str) -> usize {
+    let key = server_key(server);
+    servers
+        .iter()
+        .position(|s| server_key(s) == key)
+        .unwrap_or(0)
+}
+
+/// 以 `start` 为起点按配置顺序轮转查询，返回第一个有记录的应答。
+///
+/// 这是每个 worker 的「首选 DNS + 兜底链」：先用自己的首选 DNS，
+/// 超时 / 解析失败 / 无匹配记录时依次换下一台，全部失败才把错误交回上层
+/// （上层通常会再回退到系统解析）。这样不同 worker 分散到不同 DNS，
+/// 又不会因为某台 DNS 故障而整条线程卡死。
+pub fn query_ordered(
+    host: &str,
+    servers: &[String],
+    qtype: u16,
+    timeout: Duration,
+    start: usize,
+) -> Result<Answer, String> {
+    let servers = dedupe_servers(servers);
+    if servers.is_empty() {
+        return Err("未配置 DNS 服务器".into());
+    }
+    let n = servers.len();
+    let mut last = String::from("DNS 解析失败");
+    for k in 0..n {
+        let idx = (start % n + k) % n;
+        match query(host, &servers[idx], qtype, timeout) {
+            Ok(a) if !a.ips.is_empty() => return Ok(a),
+            Ok(a) => last = format!("{} 无匹配记录", a.server),
+            Err(e) => last = e,
+        }
+    }
+    Err(format!("{} 台 DNS 均失败: {}", n, last))
+}
+
 /// 依次尝试多个 DNS 服务器，返回第一个成功结果。
 pub fn resolve_with_servers(
     host: &str,
@@ -521,5 +561,39 @@ mod tests {
                 "https://dns.google/dns-query/",
             ]
         );
+    }
+
+    #[test]
+    fn index_matches_normalized_aliases() {
+        let servers = dedupe_servers(&[
+            "223.5.5.5".to_string(),
+            "https://dns.alidns.com/dns-query".to_string(),
+            "tls://dns.google".to_string(),
+        ]);
+        assert_eq!(index_of(&servers, "223.5.5.5:53"), 0);
+        assert_eq!(index_of(&servers, "dot://dns.google:853"), 2);
+        // 未知服务器归到 0，调用方仍能拿到一条可用链路。
+        assert_eq!(index_of(&servers, "9.9.9.9"), 0);
+    }
+
+    /// 真实网络验证「首选 DNS + 逐台回退」，需要外网，默认跳过。
+    #[test]
+    #[ignore]
+    fn live_ordered_chain_falls_back() {
+        let servers = dedupe_servers(&[
+            "223.5.5.5".to_string(),
+            "119.29.29.29".to_string(),
+            // 文档保留地址，必然不可达，用来验证回退。
+            "203.0.113.7".to_string(),
+        ]);
+        let a = query_ordered("www.cloudflare.com", &servers, 1, Duration::from_secs(2), 0)
+            .expect("首选 DNS 应成功");
+        println!("start=0 -> {} via {}", a.ips[0], a.server);
+        assert_eq!(a.server, "223.5.5.5");
+
+        let b = query_ordered("www.cloudflare.com", &servers, 1, Duration::from_secs(2), 2)
+            .expect("首选不可达时必须回退");
+        println!("start=2 -> {} via {}", b.ips[0], b.server);
+        assert_ne!(b.server, "203.0.113.7");
     }
 }
