@@ -107,6 +107,7 @@ fn handle(cmd: &str, args: &Value) -> Result<Value, String> {
         "resource_links" => download::resolve_resource_links(args),
         "dl_list" => Ok(download::list()),
         "dl_scan" => Ok(download::scan(args)),
+        "dl_stat" => Ok(download::stat(args)),
         "dl_detail" => download::detail(args),
         "dl_delete" => download::delete(args),
         "start_dns" => diag::start_dns(args.clone()),

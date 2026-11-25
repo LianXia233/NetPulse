@@ -334,14 +334,12 @@ fn extract_ip(body: &str, v6: bool) -> Option<String> {
     for ch in body.chars() {
         if ch.is_ascii_hexdigit() || ch == '.' || ch == ':' || ch == 'x' || ch == 'X' {
             token.push(ch);
-        } else {
-            if !token.is_empty() {
-                let t = token.trim_matches(|c| c == '.' || c == ':');
-                if v6 {
-                    if let Ok(ip) = t.parse::<std::net::Ipv6Addr>() { return Some(ip.to_string()); }
-                } else if let Ok(ip) = t.parse::<std::net::Ipv4Addr>() { return Some(ip.to_string()); }
-                token.clear();
-            }
+        } else if !token.is_empty() {
+            let t = token.trim_matches(|c| c == '.' || c == ':');
+            if v6 {
+                if let Ok(ip) = t.parse::<std::net::Ipv6Addr>() { return Some(ip.to_string()); }
+            } else if let Ok(ip) = t.parse::<std::net::Ipv4Addr>() { return Some(ip.to_string()); }
+            token.clear();
         }
     }
     if !token.is_empty() {

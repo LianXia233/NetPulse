@@ -25,12 +25,17 @@ pub struct CdnEntry {
     pub ip: String,
     pub dns: String,
     pub ms: u128,
+    /// 该 IP 由第几台 DNS 解析得到；`usize::MAX` 表示解析失败（留给系统解析兜底）。
+    /// 工作线程据此「只用自己那台 DNS 的节点」，并在线程之间摊开 DNS 压力。
+    pub dns_idx: usize,
 }
 
 pub struct WorkerStat {
     pub id: usize,
     pub ip: Mutex<String>,
     pub dns: Mutex<String>,
+    /// 该线程首选的 DNS 下标（配置列表序）；None 表示没有可用自定义 DNS。
+    pub dns_pref: Mutex<Option<usize>>,
     pub cdn: Mutex<String>,
     pub bytes: AtomicU64,
     pub last_bytes: AtomicU64,
@@ -51,6 +56,7 @@ impl WorkerStat {
             id,
             ip: Mutex::new(String::new()),
             dns: Mutex::new(String::new()),
+            dns_pref: Mutex::new(None),
             cdn: Mutex::new(String::new()),
             bytes: AtomicU64::new(0),
             last_bytes: AtomicU64::new(0),
@@ -535,19 +541,66 @@ fn build_cdn_pool(
                     continue;
                 }
                 got = true;
+                let dns_idx = dns::index_of(&servers, &a.server);
                 for ip in a.ips {
                     let ip = ip.to_string();
-                    if !out.iter().any(|e| e.url == *url && e.ip == ip) {
-                        out.push(CdnEntry { url: url.clone(), ip, dns: a.server.clone(), ms: a.elapsed_ms });
+                    // 按 (URL, IP, DNS) 去重：两台 DNS 常常解析到同一个 CDN IP，
+                    // 这里保留各自的归属，线程才能真的按 DNS 分组调度。
+                    if !out
+                        .iter()
+                        .any(|e| e.url == *url && e.ip == ip && e.dns_idx == dns_idx)
+                    {
+                        out.push(CdnEntry {
+                            url: url.clone(),
+                            ip,
+                            dns: a.server.clone(),
+                            ms: a.elapsed_ms,
+                            dns_idx,
+                        });
                     }
                 }
             }
         }
         if !got {
-            out.push(CdnEntry { url: url.clone(), ip: String::new(), dns: "自动".into(), ms: 0 });
+            out.push(CdnEntry {
+                url: url.clone(),
+                ip: String::new(),
+                dns: "自动".into(),
+                ms: 0,
+                dns_idx: usize::MAX,
+            });
         }
     }
     out
+}
+
+/// 选出本线程第 `attempt` 次尝试该用的节点。
+///
+/// 线程 i 的首选 DNS 是 `i % n`；`rank` 是「同一台 DNS 下的第几条线程」，
+/// 用它做组内起点，避免同组线程全盯住同一个 IP。前 `own.len()` 次尝试只在
+/// 首选 DNS 的节点里换，之后才滑到其它 DNS 的节点，最后还有解析失败项兜底。
+fn pool_pick(pool: &[CdnEntry], pref: Option<usize>, rank: usize, attempt: usize) -> usize {
+    let n = pool.len();
+    if n == 0 {
+        return 0;
+    }
+    let Some(p) = pref else {
+        return (rank + attempt) % n;
+    };
+    let own: Vec<usize> = (0..n).filter(|&i| pool[i].dns_idx == p).collect();
+    if !own.is_empty() {
+        if attempt < own.len() {
+            return own[(rank + attempt) % own.len()];
+        }
+        // 首选 DNS 的节点都试过一轮：如果整池只有这一台 DNS，就继续在组内轮换。
+        let rest: Vec<usize> = (0..n).filter(|&i| pool[i].dns_idx != p).collect();
+        if !rest.is_empty() {
+            return rest[(rank + attempt) % rest.len()];
+        }
+        return own[(rank + attempt) % own.len()];
+    }
+    let rest: Vec<usize> = (0..n).filter(|&i| pool[i].dns_idx != p).collect();
+    rest[(rank + attempt) % rest.len().max(1)]
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -692,9 +745,26 @@ fn run(
 
     let pool = Arc::new(build_cdn_pool(&all_urls, &state.dns, &ip_mode, &dns_mode));
     *state.cdn.lock().unwrap() = (*pool).clone();
+    // 参与分流的 DNS 列表：线程 i 固定首选第 i % n 台，避免所有连接挤在同一台 DNS 上。
+    // 用下标列表而不是数量，某台 DNS 完全失败时也不会让分组错位。
+    let dns_used: Arc<Vec<usize>> = Arc::new({
+        let mut idxs: Vec<usize> = pool
+            .iter()
+            .filter(|e| e.dns_idx != usize::MAX)
+            .map(|e| e.dns_idx)
+            .collect();
+        idxs.sort_unstable();
+        idxs.dedup();
+        idxs
+    });
+    let dns_total = dns_used.len();
     task.emit(json!({
         "type": "cdn",
-        "entries": pool.iter().map(|e| json!({"url": e.url, "ip": e.ip, "dns": e.dns, "ms": e.ms})).collect::<Vec<_>>()
+        "dns_total": dns_total,
+        "entries": pool.iter().map(|e| json!({
+            "url": e.url, "ip": e.ip, "dns": e.dns, "ms": e.ms,
+            "dns_idx": if e.dns_idx == usize::MAX { Value::Null } else { json!(e.dns_idx) }
+        })).collect::<Vec<_>>()
     }));
 
     // 2) 分段（默认 6 倍连接数的动态队列）
@@ -846,6 +916,7 @@ fn run(
         let stat = stat.clone();
         let bind_if = bind_if.clone();
         let ramp = ramp.clone();
+        let dns_used = dns_used.clone();
         handles.push(thread::spawn(move || loop {
             if cancel.load(Ordering::Relaxed) {
                 break;
@@ -909,6 +980,7 @@ fn run(
                 let r = download_chunk(
                     &pool,
                     w,
+                    &dns_used,
                     &cache,
                     &headers,
                     retries,
@@ -1879,6 +1951,7 @@ fn save_meta(
 fn download_chunk(
     pool: &[CdnEntry],
     worker_idx: usize,
+    dns_used: &[usize],
     cache: &ResolveCache,
     headers: &[(String, String)],
     retries: u32,
@@ -1907,9 +1980,18 @@ fn download_chunk(
     if offset >= expected_total {
         return Ok(());
     }
+    // 线程的首选 DNS 固定下来：重试时先在本组内换节点，全组失败才用其它 DNS 的节点。
+    let pref = if dns_used.is_empty() {
+        None
+    } else {
+        Some(dns_used[worker_idx % dns_used.len()])
+    };
+    *worker.dns_pref.lock().unwrap() = pref;
+    // 同一台 DNS 下的第几条线程，决定组内从哪个节点开始轮。
+    let rank = worker_idx / dns_used.len().max(1);
     let mut resp = None;
     for attempt in 0..=retries {
-        let entry = &pool[(worker_idx + attempt as usize) % pool.len().max(1)];
+        let entry = &pool[pool_pick(pool, pref, rank, attempt as usize)];
         let mut req = build_req("GET", &entry.url, headers);
         // 用户自定义 Range 会破坏分段调度，统一忽略。
         req.headers.retain(|(k, _)| !k.eq_ignore_ascii_case("range"));
@@ -1917,6 +1999,8 @@ fn download_chunk(
         req.bind_if = bind_if.to_string();
         req.pin_ip = entry.ip.parse().ok();
         req.pin_dns = Some(entry.dns.clone());
+        // 没预解析出 IP（或该节点全部失败）时，用本线程的首选 DNS 现解析，失败自动回退。
+        req.dns_pref = pref;
         if supports_range {
             req.headers.push((
                 "Range".into(),
@@ -2081,6 +2165,7 @@ pub fn detail(args: &Value) -> Result<Value, String> {
             "id": w.id,
             "ip": *w.ip.lock().unwrap(),
             "dns": *w.dns.lock().unwrap(),
+            "dns_pref": *w.dns_pref.lock().unwrap(),
             "cdn": *w.cdn.lock().unwrap(),
             "bytes": w.bytes.load(Ordering::Relaxed),
             "mbps": (w.speed_kbps.load(Ordering::Relaxed) as f64) / 100.0,
@@ -2091,9 +2176,40 @@ pub fn detail(args: &Value) -> Result<Value, String> {
             "errs": w.errs.load(Ordering::Relaxed),
         })
     }).collect();
-    let cdn: Vec<Value> = state.cdn.lock().unwrap().iter().map(|e| json!({
-        "url": e.url, "ip": e.ip, "dns": e.dns, "ms": e.ms
-    })).collect();
+    let cdn_entries = state.cdn.lock().unwrap().clone();
+    // 参与分流的 DNS 台数（按归属下标去重）。
+    let dns_total = {
+        let mut idxs: Vec<usize> = cdn_entries
+            .iter()
+            .filter(|e| e.dns_idx != usize::MAX)
+            .map(|e| e.dns_idx)
+            .collect();
+        idxs.sort_unstable();
+        idxs.dedup();
+        idxs.len()
+    };
+    // 展示层按 IP 合并：同一个 IP 常被多台 DNS 解析到，
+    // 界面上把命中的 DNS 并列出来即可，不必重复列出多条节点。
+    let mut agg: Vec<(String, String, Vec<String>, u128)> = Vec::new();
+    for e in cdn_entries.iter() {
+        if let Some(slot) = agg
+            .iter_mut()
+            .find(|(u, i, _, _)| u == &e.url && i == &e.ip)
+        {
+            if !slot.2.contains(&e.dns) {
+                slot.2.push(e.dns.clone());
+            }
+            if e.ms > 0 && (slot.3 == 0 || e.ms < slot.3) {
+                slot.3 = e.ms;
+            }
+        } else {
+            agg.push((e.url.clone(), e.ip.clone(), vec![e.dns.clone()], e.ms));
+        }
+    }
+    let cdn: Vec<Value> = agg
+        .iter()
+        .map(|(u, ip, dns, ms)| json!({ "url": u, "ip": ip, "dns": dns.join(" · "), "ms": ms }))
+        .collect();
     Ok(json!({
         "id": id,
         "url": state.url,
@@ -2113,6 +2229,7 @@ pub fn detail(args: &Value) -> Result<Value, String> {
         "chunks": chunks,
         "workers": workers,
         "cdn": cdn,
+        "dns_total": dns_total,
         "connections": state.connections,
     }))
 }
@@ -2186,6 +2303,60 @@ pub fn scan(args: &Value) -> Value {
             if size == 0 {
                 continue;
             }
+            // 所有分块都已落盘，只差改名收尾（常见于最后一刻被杀进程）。
+            // 这种任务已经下完，直接转成正式文件并从恢复列表移除，
+            // 避免下次启动还提示「继续下载」而重下一份。
+            // 正在跑的任务不能碰：它自己会在收尾时改名，这里抢跑会写坏文件。
+            let busy = dls().lock().unwrap().values().any(|s| {
+                let path = s.data_path.lock().unwrap().clone();
+                if path != data_path {
+                    return false;
+                }
+                let st = s.status.lock().unwrap().clone();
+                st == "running" || st == "probing"
+            });
+            if !busy && done >= size {
+                let disk_len = data_path.metadata().map(|m| m.len()).unwrap_or(0);
+                if disk_len >= size {
+                    let final_name = unique_final_name(Path::new(dir), &name);
+                    let final_path = Path::new(dir).join(&final_name);
+                    if fs::rename(&data_path, &final_path).is_ok() {
+                        let _ = fs::remove_file(&path);
+                        items.push(json!({
+                            "id": format!("local:{}", path.to_string_lossy()),
+                            "url": url,
+                            "name": final_name,
+                            "dir": dir,
+                            "path": final_path.to_string_lossy(),
+                            "size": size,
+                            "done": size,
+                            "mbps": 0,
+                            "status": "done",
+                            "finished": true,
+                            "error": "",
+                            "mirrors": meta["mirrors"].as_array().cloned().unwrap_or_default(),
+                            "headers": {},
+                            "dns": meta["dns"].as_array().cloned().unwrap_or_default(),
+                            "connections": meta["connections"].as_u64().unwrap_or(8),
+                            "block_kb": meta["block_kb"].as_u64().unwrap_or(0),
+                            "retries": meta["retries"].as_u64().unwrap_or(2),
+                            "kind": "http",
+                            "chunk_total": chunk_total,
+                            "parts_total": 0,
+                            "parts_done": 0,
+                            "recovered": false,
+                            "created": entry
+                                .metadata()
+                                .ok()
+                                .and_then(|m| m.modified().ok())
+                                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                                .map(|d| d.as_secs())
+                                .unwrap_or(0),
+                        }));
+                        continue;
+                    }
+                }
+            }
             let created = entry
                 .metadata()
                 .ok()
@@ -2223,6 +2394,26 @@ pub fn scan(args: &Value) -> Value {
     }
     items.sort_by_key(|v| std::cmp::Reverse(v["created"].as_u64().unwrap_or(0)));
     json!({"items": items})
+}
+
+/// 检查某个任务的目标文件是否已经落在磁盘上。
+/// App 端用它把「其实已经下完、只是记录没来得及更新」的任务收敛成已完成，
+/// 不再显示「继续下载」。
+pub fn stat(args: &Value) -> Value {
+    let dir = args["dir"].as_str().unwrap_or("").trim();
+    let name = args["name"].as_str().unwrap_or("").trim();
+    if dir.is_empty() || name.is_empty() || name.contains('/') || name.contains('\\') {
+        return json!({"exists": false, "size": 0});
+    }
+    let path = Path::new(dir).join(name);
+    match fs::metadata(&path) {
+        Ok(m) if m.is_file() => json!({
+            "exists": true,
+            "size": m.len(),
+            "path": path.to_string_lossy(),
+        }),
+        _ => json!({"exists": false, "size": 0}),
+    }
 }
 
 pub fn delete(args: &Value) -> Result<Value, String> {
@@ -2325,5 +2516,135 @@ mod tests {
         let next = unique_final_name(&dir, "a.zip");
         assert_eq!(next, "a (1).zip");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn entry(ip: &str, dns_idx: usize) -> CdnEntry {
+        CdnEntry {
+            url: "https://cdn.test/f".into(),
+            ip: ip.into(),
+            dns: format!("dns{}", dns_idx),
+            ms: 1,
+            dns_idx,
+        }
+    }
+
+    #[test]
+    fn pool_pick_keeps_own_dns_first() {
+        let pool = vec![
+            entry("1.1.1.1", 0),
+            entry("2.2.2.2", 1),
+            entry("3.3.3.3", 0),
+            entry("4.4.4.4", usize::MAX),
+        ];
+        // 首选 DNS 1 只有一条节点：第一次命中它，之后滑到别的 DNS 兜底。
+        let own: Vec<usize> = (0..4).map(|a| pool_pick(&pool, Some(1), 0, a)).collect();
+        assert_eq!(own[0], 1);
+        assert!(own[1] != 1 && own[2] != 1);
+        assert_ne!(own[1], own[2]); // 兜底项之间也要轮换，不能死盯一个 IP
+
+        // 首选 DNS 0 有两条节点，组内按 rank 错开，保证同组线程不撞同一个 IP。
+        assert_eq!(pool_pick(&pool, Some(0), 0, 0), 0);
+        assert_eq!(pool_pick(&pool, Some(0), 1, 0), 2);
+        assert!(pool_pick(&pool, Some(0), 0, 2) != 0);
+
+        // 没有自定义 DNS：整池轮转。
+        assert_eq!(pool_pick(&pool, None, 1, 0), 1);
+        assert_eq!(pool_pick(&pool, None, 0, 3), 3);
+
+        // 首选 DNS 在本池里没有任何节点：不能丢节点，整池作为兜底。
+        let pick = pool_pick(&pool, Some(5), 0, 0);
+        assert!(pick < pool.len());
+    }
+
+    #[test]
+    fn scan_finalizes_completed_temp_file() {
+        let dir = std::env::temp_dir().join(format!("netpulse-scan-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let data = dir.join(".done.bin.abcd1234abcd1234.pmdown");
+        let meta = dir.join(".done.bin.abcd1234abcd1234.pmdown.json");
+        fs::write(&data, vec![7u8; 10]).unwrap();
+        let text = json!({
+            "version": 2,
+            "url": "https://example.test/done.bin",
+            "name": "done.bin",
+            "size": 10,
+            "data_file": data.to_string_lossy(),
+            "chunks": [{"start": 0, "end": 9, "done": 10}],
+        })
+        .to_string();
+        fs::write(&meta, text).unwrap();
+
+        let out = scan(&json!({"dir": dir.to_string_lossy()}));
+        let items = out["items"].as_array().unwrap();
+        // 已经下完的任务不该再出现在「可续传」列表里，而是直接落成正式文件。
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["status"], "done");
+        assert_eq!(items[0]["finished"], true);
+        assert!(!data.exists());
+        assert!(!meta.exists());
+        assert!(dir.join("done.bin").is_file());
+        assert!(stat(&json!({"dir": dir.to_string_lossy(), "name": "done.bin"}))["exists"] == true);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 真实网络验证：多个 worker 会分散到不同 DNS，并且任务能正常跑完。
+    /// 需要外网，默认跳过（`cargo test -- --ignored`）。
+    #[test]
+    #[ignore]
+    fn live_download_spreads_across_dns() {
+        let dir = std::env::temp_dir().join(format!("netpulse-live-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let r = add(json!({
+            "url": "https://proof.ovh.net/files/10Mb.dat",
+            "dir": dir.to_string_lossy(),
+            "name": "np-live.bin",
+            "connections": 4,
+            "dns_servers": ["223.5.5.5", "119.29.29.29"],
+            "block_kb": 256,
+        }))
+        .expect("任务应能启动");
+        let id = r["task_id"].as_str().unwrap().to_string();
+        thread::sleep(Duration::from_millis(2500));
+        let d = detail(&json!({"id": id.clone()})).unwrap();
+        println!(
+            "connections={} dns_total={} cdn={}",
+            d["connections"], d["dns_total"], d["cdn"]
+        );
+        let prefs: HashSet<i64> = d["workers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|w| w["dns_pref"].as_i64())
+            .collect();
+        println!("worker dns_pref = {:?}", prefs);
+        // 两台 DNS 都可达时应分散到两组；极端网络下只有一台可用则退化为单组。
+        assert!(
+            prefs.len() >= 2 || d["dns_total"].as_u64().unwrap_or(1) <= 1,
+            "worker 应分散到多台 DNS: {:?}",
+            prefs
+        );
+        for _ in 0..80 {
+            let s = detail(&json!({"id": id.clone()})).unwrap()["status"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+            if s == "done" || s == "error" {
+                println!("final status = {}", s);
+                assert_eq!(s, "done", "{:?}", detail(&json!({"id": id.clone()})));
+                break;
+            }
+            thread::sleep(Duration::from_millis(500));
+        }
+        let f = dir.join("np-live.bin");
+        assert!(f.is_file(), "成品文件应存在");
+        assert_eq!(f.metadata().unwrap().len(), 10 * 1024 * 1024);
+        let _ = fs::remove_dir_all(&dir);
+        let _ = delete(&json!({"id": id, "delete_files": false}));
+    }
+
+    #[test]
+    fn stat_rejects_path_traversal() {
+        let out = stat(&json!({"dir": "/tmp", "name": "../etc/passwd"}));
+        assert_eq!(out["exists"], false);
     }
 }
