@@ -38,7 +38,13 @@ class _SpeedPageState extends State<SpeedPage> {
       final e = t.events[i];
       if (e['type'] == 'route') {
         final idx = e['idx'];
-        if (!_routes.any((r) => r['idx'] == idx)) _routes.add(e);
+        // 每条线程只保留最新一次出口：换 DNS / 换 IP 时原地更新，而不是丢弃。
+        final at = _routes.indexWhere((r) => r['idx'] == idx);
+        if (at >= 0) {
+          _routes[at] = e;
+        } else {
+          _routes.add(e);
+        }
       }
       if (e['type'] == 'error' && _errors.length < 40) {
         _errors.add(e['message']?.toString() ?? '');
@@ -133,7 +139,7 @@ class _SpeedPageState extends State<SpeedPage> {
         children: [
           PmPageHeader(
             title: '测速',
-            subtitle: '多 CDN 并发 · 多 DNS 轮询 · Range 随机起点',
+            subtitle: '多 CDN 并发 · 线程分级 DNS · Range 随机起点',
             actions: [
               PmIconAction(
                 icon: Icons.tune_rounded,
@@ -259,7 +265,7 @@ class _SpeedPageState extends State<SpeedPage> {
                   ),
                 ),
                 if (running || _routes.isNotEmpty) ...[
-                  PmSectionTitle('连接明细', subtitle: '每个 worker 命中的 CDN IP 与 DNS 服务器'),
+                  PmSectionTitle('连接明细', subtitle: '每条线程优先用不同的 DNS 解析，失败自动逐台回退'),
                   PmCard(
                     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                     child: Column(
@@ -270,6 +276,14 @@ class _SpeedPageState extends State<SpeedPage> {
                             child: Row(
                               children: [
                                 PmPill(label: '#${r['idx']}', dense: true),
+                                if (r['dns_pref'] != null) ...[
+                                  const SizedBox(width: 4),
+                                  PmPill(
+                                    label: 'DNS${(r['dns_pref'] as num).toInt() + 1}',
+                                    color: pm.ok,
+                                    dense: true,
+                                  ),
+                                ],
                                 const SizedBox(width: 8),
                                 Expanded(
                                   child: Column(

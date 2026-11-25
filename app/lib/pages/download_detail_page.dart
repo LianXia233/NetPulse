@@ -145,6 +145,8 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
     final cdn = (d?['cdn'] as List? ?? const []).whereType<Map>().toList();
     final chunks = (d?['chunks'] as List? ?? const []).whereType<Map>().toList();
     final dnsServers = (d?['dns_servers'] as List? ?? const []).map((e) => e.toString()).toList();
+    final dnsTotal = (d?['dns_total'] as num? ?? 0).toInt();
+    final finished = status == 'done' || d?['finished'] == true;
     final mirrors = (d?['mirrors'] as List? ?? const []).map((e) => e.toString()).toList();
     final cdnHosts = cdn.map((e) => _hostOf(e['url']?.toString() ?? '')).where((e) => e.isNotEmpty).toSet().toList();
     final mbpsNow = (d?['mbps'] as num? ?? 0).toDouble();
@@ -166,7 +168,7 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
                 PmIconAction(icon: Icons.delete_outline_rounded, onTap: _deleteTask),
               ],
             ),
-            if (isRecovered) ...[
+            if (isRecovered && !finished) ...[
               PmCard(
                 padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
                 color: scheme.primary.withValues(alpha: 0.08),
@@ -257,7 +259,8 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
                     if ((d['chunk_size'] as num? ?? 0) > 0) ...[
                       const SizedBox(height: 8),
                       Text(
-                        '块大小 ${formatBytes((d['chunk_size'] as num).toDouble())} · CDN 节点 ${cdn.length} 个 · DNS ${dnsServers.isEmpty ? '—' : dnsServers.length} 个',
+                        '块大小 ${formatBytes((d['chunk_size'] as num).toDouble())} · CDN 节点 ${cdn.length} 个 · DNS ${dnsServers.isEmpty ? '—' : dnsServers.length} 个'
+                        '${dnsTotal > 1 ? '（$dnsTotal 台按线程分摊）' : ''}',
                         style: context.text.bodySmall?.copyWith(color: pm.muted),
                       ),
                     ],
@@ -323,7 +326,7 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
                 subtitle: workers.isEmpty ? null : '逐条连接的实时速度与出口归属',
               ),
               for (final w in workers) _workerCard(context, w, done: done),
-              if (isRecovered && widget.onResume != null) ...[
+              if (isRecovered && widget.onResume != null && !finished) ...[
                 const SizedBox(height: 12),
                 PmPrimaryButton(
                   label: '继续下载（断点续传）',
@@ -370,6 +373,7 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
     final share = done > 0 ? (bytes / done * 100).clamp(0.0, 100.0) : 0.0;
     final ip = w['ip']?.toString() ?? '';
     final dns = w['dns']?.toString() ?? '';
+    final dnsPref = (w['dns_pref'] as num?)?.toInt();
     final cdnHost = _hostOf(w['cdn']?.toString() ?? '');
     final state = w['state']?.toString() ?? '—';
     final color = switch (state) {
@@ -449,7 +453,12 @@ class _DownloadDetailPageState extends State<DownloadDetailPage> {
             ],
             if (dns.isNotEmpty) ...[
               const SizedBox(height: 5),
-              _lineItem(context, Icons.router_rounded, 'DNS', dns),
+              _lineItem(
+                context,
+                Icons.router_rounded,
+                'DNS',
+                dnsPref == null ? dns : '$dns · 首选 #${dnsPref + 1}',
+              ),
             ],
             if (err.isNotEmpty) ...[
               const SizedBox(height: 9),

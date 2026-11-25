@@ -24,6 +24,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
   bool _loading = false;
   bool _scanDone = false;
   DateTime _lastPersist = DateTime.fromMillisecondsSinceEpoch(0);
+  final TaskReconciler _reconciler = TaskReconciler();
 
   @override
   void initState() {
@@ -62,7 +63,13 @@ class _DownloadsPageState extends State<DownloadsPage> {
       }
       if (!mounted) return;
       final now = DateTime.now();
-      var meaningful = false;
+      // 先把「磁盘上已下完、记录还没更新」的任务收敛成已完成，
+      // 否则重启后会一直显示「继续下载」。
+      final corrected = await _reconciler.sweep(
+        store,
+        liveKeys: live.map(AppStore.downloadRecordKey).toSet(),
+      );
+      var meaningful = corrected > 0;
       // 实时任务的配置回写到本地记录；进程被杀后仍能继续。
       for (final item in live) {
         final key = AppStore.downloadRecordKey(item);
@@ -309,6 +316,30 @@ class _DownloadsPageState extends State<DownloadsPage> {
 
   void _add() => showDownloadSheet(context);
 
+  /// 清理已完成任务记录：只删记录，不碰磁盘上的文件。
+  Future<void> _clearFinished() async {
+    final store = AppScope.of(context);
+    final keys = store.downloadRecords
+        .where((r) => r['status']?.toString() == 'done')
+        .map(AppStore.downloadRecordKey)
+        .toList();
+    if (keys.isEmpty) {
+      pmToast(context, '暂无已完成的记录');
+      return;
+    }
+    final ok = await askConfirm(
+      context,
+      title: '清理已完成记录',
+      message: '将移除 ${keys.length} 条已完成任务的记录，已下载的文件仍保留在下载目录。',
+      confirmLabel: '清理',
+    );
+    if (!ok || !mounted) return;
+    final removed = store.removeDownloadRecords(keys);
+    _scanDone = false;
+    await _refresh();
+    if (mounted) pmToast(context, '已清理 $removed 条记录');
+  }
+
   void _openBrowser() {
     Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BrowserPage()));
   }
@@ -411,6 +442,24 @@ class _DownloadsPageState extends State<DownloadsPage> {
               const SizedBox(height: 12),
               PmField(controller: ua, label: '默认 User-Agent', maxLines: 2),
               const SizedBox(height: 16),
+              Text('任务记录', style: context.text.titleSmall),
+              const SizedBox(height: 2),
+              Text(
+                '已完成的记录会留在列表里，方便回看；可在这里一次性清掉记录，已下载的文件不受影响。',
+                style: context.text.bodySmall?.copyWith(color: pm.muted, height: 1.45),
+              ),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: TextButton.icon(
+                  onPressed: () async {
+                    Navigator.pop(context);
+                    await _clearFinished();
+                  },
+                  icon: Icon(Icons.cleaning_services_rounded, size: 16, color: context.scheme.primary),
+                  label: Text('清理已完成记录', style: TextStyle(color: context.scheme.primary, fontSize: 13)),
+                ),
+              ),
+              const SizedBox(height: 4),
               PmPrimaryButton(
                 label: '保存默认值',
                 icon: Icons.check_rounded,
@@ -583,6 +632,7 @@ class _DownloadTile extends StatelessWidget {
     final id = item['id']?.toString() ?? '';
     final speed = (item['mbps'] as num? ?? 0).toDouble();
     final mirrors = (item['mirrors'] as List? ?? const []).length;
+    final dnsCount = (item['dns'] as List? ?? const []).length;
     final headerKeys = (item['headers'] as Map? ?? const {}).keys.toList();
 
     return PmCard(
@@ -617,13 +667,14 @@ class _DownloadTile extends StatelessWidget {
                         fontSize: 11,
                       ),
                     ),
-                    if (mirrors > 1 || headerKeys.isNotEmpty) ...[
+                    if (mirrors > 1 || headerKeys.isNotEmpty || dnsCount > 1) ...[
                       const SizedBox(height: 5),
                       Wrap(
                         spacing: 5,
                         runSpacing: 4,
                         children: [
                           if (mirrors > 1) PmPill(label: 'CDN $mirrors', dense: true),
+                          if (dnsCount > 1) PmPill(label: 'DNS $dnsCount', color: pm.ok, dense: true),
                           if (headerKeys.isNotEmpty)
                             PmPill(label: '鉴权 ${headerKeys.length}', color: pm.series2, dense: true),
                           if ((item['block_kb'] as num? ?? 0) > 0)

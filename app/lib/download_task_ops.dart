@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 
 import 'bridge.dart';
+import 'store.dart';
 import 'theme.dart';
 import 'widgets.dart';
 
@@ -215,6 +216,88 @@ Future<bool?> askDeleteTask(BuildContext context, TaskFiles files) {
       },
     ),
   );
+}
+
+/// 把「记录里还在下载、磁盘上其实已经下完」的任务收敛成已完成。
+///
+/// 典型场景：下载刚跑完就被杀进程，或者记录每 5 秒才落盘一次，
+/// 重启后记录仍停在 running / paused，列表就会提示「继续下载」，
+/// 点下去还会重新下一份带 `(1)` 后缀的文件。这里按记录里的目录 + 文件名
+/// 做一次磁盘校验，命中即标记完成并隐藏续传入口。
+class TaskReconciler {
+  final Set<String> _checked = {};
+
+  /// 返回本次修正的记录数；`liveKeys` 是内核此刻仍在跑的任务键。
+  Future<int> sweep(AppStore store, {required Set<String> liveKeys}) async {
+    var fixed = 0;
+    for (final rec in List<Map<String, dynamic>>.of(store.downloadRecords)) {
+      final key = AppStore.downloadRecordKey(rec);
+      if (liveKeys.contains(key)) continue;
+      if (rec['status']?.toString() == 'done') continue;
+      final size = (rec['size'] as num? ?? 0).toInt();
+      if (size <= 0) continue;
+      final dir = rec['dir']?.toString().trim() ?? '';
+      final name = rec['name']?.toString().trim() ?? '';
+      if (dir.isEmpty || name.isEmpty) continue;
+      // 每个键一次会话只查一次，避免 900ms 刷新里反复打内核。
+      if (!_checked.add(key)) continue;
+      try {
+        final r = await Core.callAsync('dl_stat', {'dir': dir, 'name': name});
+        final d = r['data'];
+        if (r['ok'] != true || d is! Map) continue;
+        if (d['exists'] != true) continue;
+        final onDisk = (d['size'] as num? ?? 0).toInt();
+        if (onDisk < size) continue;
+        store.upsertDownloadRecord({
+          ...rec,
+          'status': 'done',
+          'done': size,
+          'live': false,
+          'recovered': false,
+          if (d['path'] != null) 'path': d['path'],
+        }, persist: false);
+        fixed++;
+      } catch (_) {
+        // 内核暂时不可用时不阻塞列表刷新，下次启动再校验。
+      }
+    }
+    return fixed;
+  }
+}
+
+/// 轻量确认框：返回 true 表示用户确认。
+Future<bool> askConfirm(
+  BuildContext context, {
+  required String title,
+  required String message,
+  String confirmLabel = '确认',
+  bool danger = false,
+}) async {
+  final pm = context.pm;
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: ctx.pm.card,
+      surfaceTintColor: Colors.transparent,
+      shape: RoundedSuperellipseBorder(borderRadius: BorderRadius.circular(24)),
+      title: Text(title, style: ctx.text.titleLarge?.copyWith(fontSize: 19, color: ctx.scheme.onSurface)),
+      content: Text(
+        message,
+        style: ctx.text.bodySmall?.copyWith(fontSize: 13, height: 1.55, color: ctx.pm.muted),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text('取消', style: TextStyle(color: pm.muted))),
+        TextButton(
+          onPressed: () => Navigator.pop(ctx, true),
+          child: Text(
+            confirmLabel,
+            style: TextStyle(color: danger ? pm.warn : ctx.scheme.primary, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
+    ),
+  );
+  return ok ?? false;
 }
 
 /// 执行删除：活跃任务交给内核取消线程并清临时分块，离线记录直接删临时文件。

@@ -48,7 +48,7 @@ class HistoryRecord {
 }
 
 const String kDefaultDownloadDir = '/storage/emulated/0/Download/NetPulse';
-const String kAppVersion = '1.3.0';
+const String kAppVersion = '1.4.0';
 
 String _dnsKey(String value) {
   var key = value.trim().toLowerCase();
@@ -563,6 +563,17 @@ class AppStore extends ChangeNotifier {
   void removeDownloadRecord(String key) {
     downloadRecords.removeWhere((r) => downloadRecordKey(r) == key);
     save();
+  }
+
+  /// 批量移除记录（一次落盘），用于清理已完成任务。
+  int removeDownloadRecords(Iterable<String> keys) {
+    final set = keys.toSet();
+    if (set.isEmpty) return 0;
+    final before = downloadRecords.length;
+    downloadRecords.removeWhere((r) => set.contains(downloadRecordKey(r)));
+    final removed = before - downloadRecords.length;
+    if (removed > 0) save();
+    return removed;
   }
 
   void updateDownloadRecordProgress(
