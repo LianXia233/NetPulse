@@ -104,8 +104,12 @@ class UserScript {
     updatedAt: j['updatedAt']?.toString() ?? '',
   );
 
-  UserScript copyWith({bool? enabled, String? version, String? updatedAt}) =>
-      UserScript(
+  UserScript copyWith({
+    bool? enabled,
+    String? version,
+    String? updatedAt,
+    String? sourceUrl,
+  }) => UserScript(
         id: id,
         name: name,
         namespace: namespace,
@@ -113,7 +117,7 @@ class UserScript {
         description: description,
         author: author,
         homepage: homepage,
-        sourceUrl: sourceUrl,
+        sourceUrl: sourceUrl ?? this.sourceUrl,
         match: match,
         include: include,
         exclude: exclude,
@@ -521,6 +525,16 @@ class UserScriptStore {
     await _save();
   }
 
+  /// 补充安装来源：从 GreasyFork 官方安装按钮装进来的脚本只知道 .user.js
+  /// 直链，记回脚本页地址后「检查更新」和页面上的「已安装」标记才认得。
+  Future<void> setSourceUrl(String id, String sourceUrl) async {
+    final i = _scripts.indexWhere((s) => s.id == id);
+    final url = sourceUrl.trim();
+    if (i < 0 || url.isEmpty || _scripts[i].sourceUrl == url) return;
+    _scripts[i] = _scripts[i].copyWith(sourceUrl: url);
+    await _save();
+  }
+
   Future<void> remove(String id) async {
     _scripts.removeWhere((s) => s.id == id);
     _kv.removeWhere((k, _) => k.startsWith('$id\u0000'));
@@ -598,6 +612,15 @@ class UserScriptStore {
   Future<void> kvDelete(String scriptId, String name) async {
     _kv.remove('$scriptId\u0000$name');
     await _saveKv();
+  }
+
+  /// 判断导航地址是不是用户脚本源码：GreasyFork 的安装按钮指向
+  /// `update.greasyfork.org/scripts/<id>/<name>.user.js`，OpenUserJS 与
+  /// GitHub raw 也以 `.user.js` 结尾。命中后应当安装而不是把源码当网页打开。
+  static bool looksLikeUserScriptUrl(String url) {
+    final u = url.trim().toLowerCase();
+    if (!u.startsWith('http://') && !u.startsWith('https://')) return false;
+    return RegExp(r'\.user\.js($|[?#&])').hasMatch(u);
   }
 
   /// 从 .user.js 地址安装。

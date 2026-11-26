@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:netpulse/userscript.dart';
 
@@ -99,5 +101,52 @@ void main() {
     expect(script.hostHints, ['pan.baidu.com', 'example.com']);
     final all = UserScript(id: 'y', name: 'n', match: ['<all_urls>']);
     expect(all.hostHints, ['*']);
+  });
+
+  test('识别 .user.js 直链，避免把源码当网页打开', () {
+    expect(
+      UserScriptStore.looksLikeUserScriptUrl(
+        'https://update.greasyfork.org/scripts/470233/name.user.js',
+      ),
+      isTrue,
+    );
+    expect(
+      UserScriptStore.looksLikeUserScriptUrl(
+        'https://example.com/a.user.js?raw=1',
+      ),
+      isTrue,
+    );
+    expect(
+      UserScriptStore.looksLikeUserScriptUrl(
+        'https://greasyfork.org/zh-CN/scripts/470233',
+      ),
+      isFalse,
+    );
+    expect(
+      UserScriptStore.looksLikeUserScriptUrl('https://example.com/a.js'),
+      isFalse,
+    );
+    expect(UserScriptStore.looksLikeUserScriptUrl('javascript:void(0)'), isFalse);
+  });
+
+  test('补充安装来源时保留其它字段', () {
+    final s = UserScript(
+      id: 'x',
+      name: 'n',
+      version: '1.0',
+      sourceUrl: 'https://update.greasyfork.org/scripts/1/a.user.js',
+    );
+    final next = s.copyWith(sourceUrl: 'https://greasyfork.org/zh-CN/scripts/1');
+    expect(next.sourceUrl, 'https://greasyfork.org/zh-CN/scripts/1');
+    expect(next.name, 'n');
+    expect(next.version, '1.0');
+  });
+
+  test('GreasyFork 增强脚本接管官方安装按钮', () async {
+    final js = await File('assets/userscript/greasyfork.js').readAsString();
+    expect(js.contains('hookInstallLinks'), isTrue);
+    expect(js.contains('#install-area a.install-link'), isTrue);
+    expect(js.contains('__npGreasyRefresh'), isTrue);
+    expect(js.contains("invoke('installScript'"), isTrue);
   });
 }

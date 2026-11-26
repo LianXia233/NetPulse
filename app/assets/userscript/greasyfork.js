@@ -1,9 +1,10 @@
 /*
  * GreasyFork 页面增强。
  *
- * 1) 脚本详情页 / 列表页各加一个「安装到 NetPulse」按钮：
- *    直接取页面上的 .user.js 安装地址，交给宿主保存并启用；
- * 2) 右下角常驻「我的脚本」入口，跳到 App 内的脚本管理器。
+ * 1) 详情页 / 列表页各加一个「安装到 NetPulse」按钮；
+ * 2) 官方「安装此脚本」按钮也接管：点击后不再跳到 .user.js 源码页，
+ *    直接交给宿主安装（导航层还有一层兜底）；
+ * 3) 右下角常驻「我的脚本」入口，跳到 App 内的脚本管理器。
  *
  * 只做 UI 注入，真正的抓取与存储都在宿主侧完成。
  */
@@ -17,6 +18,7 @@
 
   var STYLE_ID = 'np-gf-style';
   var ACCENT = '#2f6fed';
+  var LINK_SEL = 'a[href*=".user.js"]';
 
   function log(msg) {
     try {
@@ -32,6 +34,18 @@
     }
   }
 
+  /** 详情页 /code 页统一成详情页地址，便于宿主记录来源与判断已安装。 */
+  function pageUrlOf(href) {
+    return abs(href || location.href)
+      .split('#')[0]
+      .split('?')[0]
+      .replace(/\/code\/?$/, '');
+  }
+
+  function isUserScript(href) {
+    return /\.user\.js($|[?#&])/i.test(href || '');
+  }
+
   function ensureStyle() {
     if (document.getElementById(STYLE_ID)) return;
     var el = document.createElement('style');
@@ -41,6 +55,7 @@
       'border:0;border-radius:8px;background:' + ACCENT + ';color:#fff;font-size:13px;font-weight:600;' +
       'cursor:pointer;box-shadow:0 2px 8px rgba(47,111,237,.28);}' +
       '.np-gf-btn:disabled{opacity:.6;cursor:default;}' +
+      '.np-gf-btn.installed{background:#1f9d55;box-shadow:0 2px 8px rgba(31,157,85,.28);}' +
       '.np-gf-btn.small{height:28px;padding:0 10px;font-size:12px;}' +
       '.np-gf-row{display:flex;align-items:center;gap:8px;margin:8px 0;flex-wrap:wrap;}' +
       '.np-gf-fab{position:fixed;right:16px;bottom:22px;z-index:2147483000;display:flex;align-items:center;' +
@@ -55,6 +70,8 @@
   }
 
   function toast(text, ms) {
+    var old = document.querySelector('.np-gf-toast');
+    if (old && old.parentNode) old.parentNode.removeChild(old);
     var el = document.createElement('div');
     el.className = 'np-gf-toast';
     el.textContent = text;
@@ -64,17 +81,26 @@
     }, ms || 2400);
   }
 
-  function install(url, btn) {
+  function invoke(name, args) {
     if (!window.netpulse || typeof window.netpulse.invoke !== 'function') {
-      toast('NetPulse 通道未就绪，请重新打开页面');
-      return;
+      return Promise.reject(new Error('NetPulse 通道未就绪，请重新打开页面'));
     }
+    return window.netpulse.invoke(name, args || {});
+  }
+
+  /**
+   * codeUrl 是 .user.js 直链；pageUrl 是脚本详情页，用来记录安装来源。
+   * btn 为空表示从官方按钮触发，不需要改它的文案。
+   */
+  function install(codeUrl, btn, pageUrl) {
     if (btn) {
       btn.disabled = true;
       btn.textContent = '安装中…';
     }
-    window.netpulse
-      .invoke('installScript', { url: url })
+    invoke('installScript', {
+      url: codeUrl,
+      pageUrl: pageUrl || pageUrlOf(),
+    })
       .then(function (res) {
         var data = res || {};
         var label = data.name || '脚本';
@@ -83,7 +109,9 @@
         if (btn) {
           btn.disabled = false;
           btn.textContent = data.existed ? '已更新' : '已安装';
+          btn.classList.add('installed');
         }
+        refreshDetail();
       })
       .catch(function (e) {
         toast('安装失败：' + ((e && e.message) || e));
@@ -107,39 +135,85 @@
     return btn;
   }
 
+  function findInstallLink() {
+    return (
+      document.querySelector('#install-area a.install-link') ||
+      document.querySelector('a.install-link[href*=".user.js"]') ||
+      document.querySelector('#install-area a[href*=".user.js"]') ||
+      document.querySelector('a[href*="/scripts/"][href*=".user.js"]')
+    );
+  }
+
   /** 详情页：安装区旁边加按钮。 */
   function enhanceDetail() {
-    var installLink =
-      document.querySelector('a.install-link[href*="/code/"]') ||
-      document.querySelector('a[href*="/code/"][href$=".user.js"]') ||
-      document.querySelector('#install-area a[href*="/code/"]');
+    var installLink = findInstallLink();
     if (!installLink) return;
     var area =
       installLink.closest('#install-area') ||
       installLink.closest('.script-show-download') ||
       installLink.parentNode;
-    if (!area || area.querySelector('.np-gf-btn')) return;
+    if (!area) return;
+    if (area.querySelector('.np-gf-btn')) {
+      // 已经注入过，只更新「已安装」标记。
+      refreshDetail();
+      return;
+    }
     var url = abs(installLink.getAttribute('href'));
+    if (!isUserScript(url)) return;
+    var page = pageUrlOf(installLink.getAttribute('href'));
     var btn = makeButton('安装到 NetPulse', false, function (b) {
-      install(url, b);
+      install(url, b, page);
     });
     var row = document.createElement('div');
     row.className = 'np-gf-row';
     row.appendChild(btn);
     area.appendChild(row);
     log('详情页已注入安装入口');
+    refreshDetail();
+  }
 
-    // 已装过的脚本直接标出来，避免重复点击。
-    if (window.netpulse && typeof window.netpulse.invoke === 'function') {
-      window.netpulse
-        .invoke('scriptStatus', { pageUrl: location.href.split('#')[0] })
-        .then(function (res) {
-          var data = res || {};
-          if (!data.installed) return;
-          btn.textContent =
-            '已安装' + (data.version ? ' v' + data.version : '') + ' · 重新安装';
-        })
-        .catch(function () {});
+  /** 已装过的脚本直接标出来，避免重复点击。 */
+  function refreshDetail() {
+    var btn = document.querySelector('.np-gf-row .np-gf-btn');
+    if (!btn || btn.disabled) return;
+    var link = findInstallLink();
+    invoke('scriptStatus', {
+      pageUrl: pageUrlOf(),
+      codeUrl: link ? abs(link.getAttribute('href')) : '',
+    })
+      .then(function (res) {
+        var data = res || {};
+        if (!data.installed) return;
+        btn.textContent =
+          '已安装' + (data.version ? ' v' + data.version : '') + ' · 重新安装';
+        btn.classList.add('installed');
+      })
+      .catch(function () {});
+  }
+
+  /**
+   * 接管官方安装按钮。GreasyFork 的按钮是普通 a[href]，
+   * 在捕获阶段拦下就不会离开当前页面。
+   */
+  function hookInstallLinks() {
+    var links = document.querySelectorAll(LINK_SEL);
+    for (var i = 0; i < links.length; i++) {
+      var a = links[i];
+      if (a.dataset.npGfHooked === '1') continue;
+      var href = abs(a.getAttribute('href'));
+      if (!isUserScript(href)) continue;
+      a.dataset.npGfHooked = '1';
+      a.addEventListener(
+        'click',
+        function (e) {
+          var target = abs(this.getAttribute('href'));
+          if (!isUserScript(target)) return;
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          install(target, null, pageUrlOf());
+        },
+        true
+      );
     }
   }
 
@@ -156,17 +230,12 @@
         item.querySelector('h2 a[href*="/scripts/"]') ||
         item.querySelector('a[href*="/zh-CN/scripts/"]');
       if (!link) continue;
-      var pageUrl = abs(link.getAttribute('href'));
+      var page = pageUrlOf(link.getAttribute('href'));
       var holder = item.querySelector('.script-list-item-meta, .script-list-description') || item;
       var btn = makeButton('装到 NetPulse', true, function (b) {
-        if (!window.netpulse || typeof window.netpulse.invoke !== 'function') {
-          toast('NetPulse 通道未就绪');
-          return;
-        }
         b.disabled = true;
         b.textContent = '解析中…';
-        window.netpulse
-          .invoke('installScript', { pageUrl: pageUrl })
+        invoke('installScript', { pageUrl: page })
           .then(function (res) {
             var data = res || {};
             b.textContent = data.existed ? '已更新' : '已安装';
@@ -193,14 +262,16 @@
     fab.className = 'np-gf-fab';
     fab.textContent = '我的脚本';
     fab.addEventListener('click', function () {
-      if (!window.netpulse || typeof window.netpulse.invoke !== 'function') return;
-      window.netpulse.invoke('openUserScripts', {}).catch(function () {});
+      invoke('openUserScripts', {}).catch(function () {});
     });
     document.body.appendChild(fab);
   }
 
   function run() {
     ensureStyle();
+    try {
+      hookInstallLinks();
+    } catch (e) {}
     try {
       enhanceDetail();
     } catch (e) {}
@@ -212,6 +283,9 @@
     } catch (e) {}
   }
 
+  // 宿主安装完成后调用，刷新「已安装」标记。
+  window.__npGreasyRefresh = run;
+
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', run);
   } else {
@@ -219,4 +293,5 @@
   }
   // GreasyFork 的部分列表是异步加载的，低频补一次。
   setTimeout(run, 1200);
+  setTimeout(run, 3000);
 })();

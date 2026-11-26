@@ -40,6 +40,7 @@ class _BrowserPageState extends State<BrowserPage> {
   late final PluginEngine _pluginEngine;
   bool _pluginsReady = false;
   final Set<String> _injectedScripts = {};
+  final Set<String> _scriptInstalls = {};
 
   static const String _desktopUa =
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -113,6 +114,13 @@ class _BrowserPageState extends State<BrowserPage> {
           },
           onNavigationRequest: (request) {
             final url = request.url;
+            // GreasyFork 等站点的「安装此脚本」按钮直接指向 .user.js，
+            // WebView 里会变成源码文本页；这里改走脚本安装。
+            if (UserScriptStore.looksLikeUserScriptUrl(url) &&
+                request.isMainFrame) {
+              unawaited(_installUserScriptFromNavigation(url));
+              return NavigationDecision.prevent;
+            }
             if (url.startsWith('blob:') || url.startsWith('data:')) {
               pmToast(context, '该链接由网页内部生成，暂不支持直接下载');
               return NavigationDecision.prevent;
@@ -1314,6 +1322,63 @@ class _BrowserPageState extends State<BrowserPage> {
     }
   }
 
+  /// 点 GreasyFork「安装此脚本」时 WebView 会导航到 .user.js 源码页，
+  /// 这里拦下来直接安装，装完刷新页面上的安装按钮状态。
+  Future<void> _installUserScriptFromNavigation(String url) async {
+    if (!_scriptInstalls.add(url)) return;
+    try {
+      final us = UserScriptStore.i;
+      await us.ensureLoaded();
+      // 之前可能从页面按钮装过（来源记的是脚本页），两种都算已存在。
+      final page = _currentScriptPageUrl();
+      final existed = us.scripts.any(
+        (s) =>
+            s.sourceUrl == url || (page.isNotEmpty && s.sourceUrl == page),
+      );
+      final r = await us.installFromUrl(url);
+      if (!mounted) return;
+      if (r.script == null) {
+        pmToast(context, '脚本安装失败：${r.error}');
+        return;
+      }
+      final s = r.script!;
+      // 刚从脚本页点的安装按钮：把当前页面记成来源，
+      // 页面上的「已安装」标记与后续检查更新才认得。
+      if (page.isNotEmpty) await us.setSourceUrl(s.id, page);
+      pmToast(
+        context,
+        '已${existed ? '更新' : '安装'} ${s.name} v${s.version}，可在「我的脚本」管理',
+      );
+      await _refreshPageScriptButtons();
+    } finally {
+      _scriptInstalls.remove(url);
+    }
+  }
+
+  /// 当前停留的脚本托管页（去掉 # 锚点、查询串与 /code 后缀）。
+  String _currentScriptPageUrl() {
+    final u = _url.trim();
+    if (!u.startsWith('http')) return '';
+    if (!u.contains('greasyfork.org') && !u.contains('openuserjs.org')) {
+      return '';
+    }
+    return u
+        .split('#')
+        .first
+        .split('?')
+        .first
+        .replaceAll(RegExp(r'/code/?$'), '');
+  }
+
+  /// 让 GreasyFork 页面里的「安装到 NetPulse」按钮同步为已安装状态。
+  Future<void> _refreshPageScriptButtons() async {
+    try {
+      await _controller.runJavaScript(
+        'window.__npGreasyRefresh && window.__npGreasyRefresh();',
+      );
+    } catch (_) {}
+  }
+
   static bool _wildcardHit(String pattern, String url) {
     final p = pattern.trim();
     if (p.isEmpty) return false;
@@ -1529,29 +1594,40 @@ $body
         final url = args['url']?.toString() ?? '';
         final store = UserScriptStore.i;
         await store.ensureLoaded();
-        final existed =
-            store.scripts.any((s) => pageUrl.isNotEmpty && s.sourceUrl == pageUrl);
-        final r = pageUrl.isNotEmpty
-            ? await store.installFromPage(pageUrl)
-            : await store.installFromUrl(url);
+        final existed = store.scripts.any(
+          (s) =>
+              (pageUrl.isNotEmpty && s.sourceUrl == pageUrl) ||
+              (url.isNotEmpty && s.sourceUrl == url),
+        );
+        final r = url.isNotEmpty
+            ? await store.installFromUrl(url)
+            : await store.installFromPage(pageUrl);
         if (r.script == null) {
           _replyPage(id, false, r.error);
         } else {
+          // 从页面按钮安装时同时拿到脚本页地址：记下来，「检查更新」
+          // 与页面上的「已安装」标记才认得出。
+          if (url.isNotEmpty && pageUrl.isNotEmpty) {
+            await store.setSourceUrl(r.script!.id, pageUrl);
+          }
           _replyPage(id, true, {
             'ok': true,
             'name': r.script!.name,
             'version': r.script!.version,
             'existed': existed,
           });
+          await _refreshPageScriptButtons();
         }
       } else if (name == 'scriptStatus') {
         // 页面用来显示「已安装 / 可更新」，不触发任何抓取。
         final pageUrl = args['pageUrl']?.toString() ?? '';
+        final codeUrl = args['codeUrl']?.toString() ?? '';
         final store = UserScriptStore.i;
         await store.ensureLoaded();
         UserScript? hit;
         for (final s in store.scripts) {
-          if (pageUrl.isNotEmpty && s.sourceUrl == pageUrl) {
+          if ((pageUrl.isNotEmpty && s.sourceUrl == pageUrl) ||
+              (codeUrl.isNotEmpty && s.sourceUrl == codeUrl)) {
             hit = s;
             break;
           }

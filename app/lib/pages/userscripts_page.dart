@@ -312,7 +312,8 @@ class _UserScriptsPageState extends State<UserScriptsPage> {
                   const SizedBox(height: 6),
                   Text(
                     '脚本在内置浏览器中按 @match 规则自动运行；'
-                    'GreasyFork 页面会多出「安装到 NetPulse」按钮。',
+                    'GreasyFork 页面会多出「安装到 NetPulse」按钮，'
+                    '点站点自带的「安装此脚本」也会直接装入，不会跳到源码页。',
                     style: context.text.bodySmall?.copyWith(
                       color: pm.muted,
                       height: 1.5,
@@ -339,7 +340,7 @@ class _UserScriptsPageState extends State<UserScriptsPage> {
         ),
         const SizedBox(height: 4),
         Text(
-          '打开 GreasyFork，脚本页会出现「安装到 NetPulse」按钮。',
+          '打开 GreasyFork，点脚本页的「安装此脚本」即可直接装入。',
           textAlign: TextAlign.center,
           style: context.text.bodySmall?.copyWith(color: pm.muted, height: 1.5),
         ),
