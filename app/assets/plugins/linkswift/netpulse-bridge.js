@@ -67,28 +67,56 @@
     }
   }
 
-  /** 从 LinkSwift 渲染出的下载按钮上回收直链，顺带按名称去重。 */
+  /**
+   * 回收 LinkSwift 渲染出来的直链。
+   *
+   * 每个文件是一个 `.pl-item`，容器上带 `data-link` / `data-name` / `data-size`；
+   * 但 aria2、比特彗星等模式只有按钮上带 `data-link` + `data-filename`，
+   * 所以先按条目取，再按按钮兜底，最后按 (名称, 链接) 去重。
+   */
   function collectFrom(root) {
     var out = [];
     var seen = {};
-    var nodes = root.querySelectorAll('[data-link][data-filename]');
-    for (var i = 0; i < nodes.length; i++) {
-      var el = nodes[i];
-      var link = el.getAttribute('data-link') || '';
-      var name = el.getAttribute('data-filename') || '';
-      if (!link || !name) continue;
-      if (!/^(https?:|data:)/i.test(link) && link.indexOf('//') !== 0) continue;
-      var key = name + '\u0000' + link;
-      if (seen[key]) continue;
+    function push(link, name, size) {
+      if (!link || !name) return;
+      if (!/^(https?:|data:)/i.test(link) && link.indexOf('//') !== 0) return;
+      var abs = absLink(link);
+      var key = name + '\u0000' + abs;
+      if (seen[key]) return;
       seen[key] = 1;
-      var size = parseInt(el.getAttribute('data-filesize') || '0', 10) || 0;
+      out.push({ name: name, url: abs, size: size || 0 });
+    }
+
+    var rows = root.querySelectorAll('.pl-item');
+    for (var i = 0; i < rows.length; i++) {
+      var row = rows[i];
+      var link = row.getAttribute('data-link') || '';
+      var name = row.getAttribute('data-name') || '';
+      var size = parseInt(row.getAttribute('data-size') || '0', 10) || 0;
       if (!size) {
-        var holder = el.parentNode;
-        if (holder && holder.getAttribute) {
-          size = parseInt(holder.getAttribute('data-size') || '0', 10) || 0;
-        }
+        var holder = row.querySelector('[data-size]');
+        if (holder) size = parseInt(holder.getAttribute('data-size') || '0', 10) || 0;
       }
-      out.push({ name: name, url: absLink(link), size: size });
+      var btn = row.querySelector('[data-link][data-filename]');
+      if (btn) {
+        if (!link) link = btn.getAttribute('data-link') || '';
+        if (!name) name = btn.getAttribute('data-filename') || '';
+        if (!size) size = parseInt(btn.getAttribute('data-filesize') || '0', 10) || 0;
+      }
+      push(link, name, size);
+    }
+
+    // 没有 .pl-item 包裹的模式（或结构变动）兜底扫按钮。
+    if (!out.length) {
+      var nodes = root.querySelectorAll('[data-link][data-filename]');
+      for (var j = 0; j < nodes.length; j++) {
+        var el = nodes[j];
+        push(
+          el.getAttribute('data-link') || '',
+          el.getAttribute('data-filename') || '',
+          parseInt(el.getAttribute('data-filesize') || '0', 10) || 0
+        );
+      }
     }
     return out;
   }
