@@ -133,6 +133,11 @@
       referrer: location.href,
     };
     log('送入下载器：' + items.length + ' 个文件');
+    // 交给宿主后会弹出 Flutter 侧参数页，先把 LinkSwift 的弹窗收起来，
+    // 免得两层遮罩叠在一起。
+    try {
+      if (window.Swal && typeof window.Swal.close === 'function') window.Swal.close();
+    } catch (e) {}
     window.netpulse.direct(payload).catch(function (e) {
       log('送入失败：' + ((e && e.message) || e));
     });

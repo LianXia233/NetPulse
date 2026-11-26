@@ -13,7 +13,7 @@
   window.__npGreasyFork = true;
 
   var host = location.hostname;
-  if (host !== 'greasyfork.org' && host.slice(-15) !== '.greasyfork.org') return;
+  if (host !== 'greasyfork.org' && host.slice(-16) !== '.greasyfork.org') return;
 
   var STYLE_ID = 'np-gf-style';
   var ACCENT = '#2f6fed';
@@ -128,6 +128,19 @@
     row.appendChild(btn);
     area.appendChild(row);
     log('详情页已注入安装入口');
+
+    // 已装过的脚本直接标出来，避免重复点击。
+    if (window.netpulse && typeof window.netpulse.invoke === 'function') {
+      window.netpulse
+        .invoke('scriptStatus', { pageUrl: location.href.split('#')[0] })
+        .then(function (res) {
+          var data = res || {};
+          if (!data.installed) return;
+          btn.textContent =
+            '已安装' + (data.version ? ' v' + data.version : '') + ' · 重新安装';
+        })
+        .catch(function () {});
+    }
   }
 
   /** 列表 / 搜索结果：每条加一个小的安装按钮。 */

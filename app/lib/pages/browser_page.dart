@@ -1544,6 +1544,23 @@ $body
             'existed': existed,
           });
         }
+      } else if (name == 'scriptStatus') {
+        // 页面用来显示「已安装 / 可更新」，不触发任何抓取。
+        final pageUrl = args['pageUrl']?.toString() ?? '';
+        final store = UserScriptStore.i;
+        await store.ensureLoaded();
+        UserScript? hit;
+        for (final s in store.scripts) {
+          if (pageUrl.isNotEmpty && s.sourceUrl == pageUrl) {
+            hit = s;
+            break;
+          }
+        }
+        _replyPage(id, true, {
+          'installed': hit != null,
+          'version': hit?.version ?? '',
+          'enabled': hit?.enabled ?? false,
+        });
       } else if (name == 'openUserScripts') {
         _replyPage(id, true, {'ok': true});
         if (mounted) {

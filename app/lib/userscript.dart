@@ -464,15 +464,22 @@ class UserScriptStore {
       if (await resDir.exists()) await resDir.delete(recursive: true);
       await resDir.create(recursive: true);
     } catch (_) {}
+    // 资源名可能含空格/中文，落盘时转义，再用 _index.json 记回原名。
+    final resIndex = <String, String>{};
     for (final entry in resources.entries) {
       final text = await fetchText(entry.value);
       if (text.isEmpty) continue;
+      final fileName = _safeName(entry.key);
       try {
-        await File('${resDir.path}/${_safeName(entry.key)}').writeAsString(
-          text,
-        );
+        await File('${resDir.path}/$fileName').writeAsString(text);
+        resIndex[entry.key] = fileName;
       } catch (_) {}
     }
+    try {
+      await File(
+        '${resDir.path}/_index.json',
+      ).writeAsString(jsonEncode(resIndex));
+    } catch (_) {}
 
     final now = DateTime.now().toIso8601String();
     final existing = byId(id);
@@ -548,9 +555,22 @@ class UserScriptStore {
     final rd = resourceDir(script.id);
     try {
       if (await rd.exists()) {
+        final indexFile = File('${rd.path}/_index.json');
+        var index = <String, String>{};
+        if (await indexFile.exists()) {
+          final raw = jsonDecode(await indexFile.readAsString());
+          if (raw is Map) {
+            raw.forEach((k, v) => index[k.toString()] = v.toString());
+          }
+        }
         for (final f in rd.listSync().whereType<File>()) {
-          final name = f.uri.pathSegments.last;
-          res[name] = await f.readAsString();
+          final fileName = f.uri.pathSegments.last;
+          if (fileName == '_index.json') continue;
+          final key = index.entries
+              .where((e) => e.value == fileName)
+              .map((e) => e.key)
+              .firstOrNull;
+          res[key ?? fileName] = await f.readAsString();
         }
       }
     } catch (_) {}
