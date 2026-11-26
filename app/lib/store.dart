@@ -48,7 +48,7 @@ class HistoryRecord {
 }
 
 const String kDefaultDownloadDir = '/storage/emulated/0/Download/NetPulse';
-const String kAppVersion = '1.4.0';
+const String kAppVersion = '1.5.0';
 
 String _dnsKey(String value) {
   var key = value.trim().toLowerCase();
@@ -148,6 +148,8 @@ class AppStore extends ChangeNotifier {
   bool browserJavaScript = true;
   bool browserSniff = true;
   bool browserIntercept = true;
+  /// 用户脚本（GreasyFork 等）总开关。
+  bool userScriptsEnabled = true;
   String get downloadDirEffective =>
       downloadDir.trim().isEmpty ? kDefaultDownloadDir : downloadDir.trim();
   List<HistoryRecord> history = [];
@@ -239,6 +241,7 @@ class AppStore extends ChangeNotifier {
         browserJavaScript = j['browserJavaScript'] != false;
         browserSniff = j['browserSniff'] != false;
         browserIntercept = j['browserIntercept'] != false;
+        userScriptsEnabled = j['userScriptsEnabled'] != false;
         // 旧版本默认使用明文 ip-api，升级后迁移到 HTTPS 源。
         if (ipApiEndpoint.contains('ip-api.com')) {
           ipApiEndpoint = 'https://ipwho.is/{ip}';
@@ -312,6 +315,7 @@ class AppStore extends ChangeNotifier {
       'browserJavaScript': browserJavaScript,
       'browserSniff': browserSniff,
       'browserIntercept': browserIntercept,
+      'userScriptsEnabled': userScriptsEnabled,
       'history': history.map((e) => e.toJson()).toList(),
       'downloadRecords': downloadRecords,
       'pluginSettings': pluginSettings,
@@ -508,6 +512,12 @@ class AppStore extends ChangeNotifier {
     if (javaScript != null) browserJavaScript = javaScript;
     if (sniff != null) browserSniff = sniff;
     if (intercept != null) browserIntercept = intercept;
+    save();
+    notifyListeners();
+  }
+
+  void setUserScriptsEnabled(bool value) {
+    userScriptsEnabled = value;
     save();
     notifyListeners();
   }

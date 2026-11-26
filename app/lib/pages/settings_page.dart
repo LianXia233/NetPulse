@@ -985,6 +985,8 @@ class SettingsPage extends StatelessWidget {
           _licenseTile(context, 'iperf3', '内置打流可执行文件', 'BSD-3-Clause', 'https://github.com/esnet/iperf'),
           const SizedBox(height: 8),
           _licenseTile(context, 'Android System WebView', '内置浏览器渲染内核', 'Apache-2.0', 'https://developer.android.com/guide/webapps'),
+          const SizedBox(height: 8),
+          _licenseTile(context, 'jQuery / SweetAlert2 / js-md5 / js-sha256', '网盘直链页面的依赖库', 'MIT', 'https://jquery.com'),
           const SizedBox(height: 16),
           PmSectionTitle('交互与设计参考'),
           Text(
@@ -995,6 +997,8 @@ class SettingsPage extends StatelessWidget {
           _creditTile(context, 'FlClash', '网络工具界面与交互参考 · GPL-3.0', 'https://github.com/chen08209/FlClash', Icons.auto_awesome_rounded),
           const SizedBox(height: 8),
           _creditTile(context, 'FluxDown', '下载器功能组织与分片思路参考 · AGPL-3.0', 'https://github.com/zerx-lab/FluxDown', Icons.download_rounded),
+          const SizedBox(height: 8),
+          _creditTile(context, 'LinkSwift', '网盘直链获取脚本 · AGPL-3.0', 'https://github.com/hmjz100/LinkSwift', Icons.link_rounded),
           const SizedBox(height: 16),
           PmPrimaryButton(
             label: '查看完整开源许可证',

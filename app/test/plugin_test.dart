@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:netpulse/plugin_runtime.dart';
 import 'package:netpulse/store.dart';
@@ -58,6 +60,53 @@ void main() {
     // 页面级解析器按站点匹配，不应落到任意资源直链上抢 m3u8-pro 的活。
     final anime = plugins.firstWhere((p) => p.id == 'anime-sites');
     expect(anime.matches('https://cdn.example.com/live/index.m3u8'), isFalse);
+  });
+
+  test('页面脚本与内置脚本引用的资源文件都存在', () async {
+    final plugins = await SitePlugin.all();
+    for (final plugin in plugins) {
+      for (final page in plugin.pageScripts) {
+        for (final batch in page.batches) {
+          for (final path in batch) {
+            final f = File('assets/plugins/${plugin.id}/$path');
+            expect(
+              await f.exists(),
+              isTrue,
+              reason: '${plugin.id} 的页面脚本 $path 不存在',
+            );
+          }
+        }
+        for (final path in page.resources.values) {
+          final f = File('assets/plugins/${plugin.id}/$path');
+          expect(
+            await f.exists(),
+            isTrue,
+            reason: '${plugin.id} 的资源 $path 不存在',
+          );
+        }
+      }
+    }
+    // 用户脚本运行环境与站点增强脚本随包发布。
+    for (final path in [
+      'assets/userscript/gm-shim.js',
+      'assets/userscript/greasyfork.js',
+    ]) {
+      expect(await File(path).exists(), isTrue, reason: '$path 不存在');
+    }
+  });
+
+  test('LinkSwift 以页面增强方式注册，且不拦截资源直链', () async {
+    final plugins = await SitePlugin.all();
+    final ls = plugins.firstWhere((p) => p.id == 'linkswift');
+    expect(ls.pageScripts, isNotEmpty);
+    expect(ls.patterns, isEmpty);
+    expect(ls.matches('https://pan.baidu.com/s/1abcdef'), isFalse);
+    final page = ls.pageScripts.first;
+    expect(page.matches('https://pan.quark.cn/s/abcdef'), isTrue);
+    expect(page.matches('https://example.com/x'), isFalse);
+    // 一批里的依赖库必须按顺序串起来，最后才是脚本主体。
+    expect(page.batches.length, greaterThanOrEqualTo(2));
+    expect(page.resources.containsKey('SwalLigt'), isTrue);
   });
 
   test('插件设置默认值与布尔/数字类型转换', () async {

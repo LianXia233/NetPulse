@@ -131,19 +131,56 @@ class SitePlugin {
 }
 
 class SitePageScript {
-  SitePageScript({required this.id, required this.patterns, required this.js});
+  SitePageScript({
+    required this.id,
+    required this.patterns,
+    required this.batches,
+    this.resources = const {},
+  });
 
   final String id;
   final List<String> patterns;
-  final List<String> js;
 
-  factory SitePageScript.fromJson(Map<String, dynamic> m) => SitePageScript(
-    id: m['id']?.toString() ?? '',
-    patterns: (m['matches'] as List? ?? const [])
-        .map((e) => e.toString())
-        .toList(),
-    js: (m['js'] as List? ?? const []).map((e) => e.toString()).toList(),
-  );
+  /// 每个子列表是一次执行单元：同一批里的脚本共享临时的全局状态
+  /// （依赖库里 jQuery 这类只能按全局挂载的库需要这样串起来）。
+  final List<List<String>> batches;
+
+  /// `GM_getResourceText` 的资源文本，键名与上游 @resource 一致。
+  final Map<String, String> resources;
+
+  factory SitePageScript.fromJson(Map<String, dynamic> m) {
+    final raw = m['js'] as List? ?? const [];
+    final batches = <List<String>>[];
+    for (final item in raw) {
+      if (item is List) {
+        final group = item
+            .map((e) => e.toString())
+            .where((e) => e.isNotEmpty)
+            .toList();
+        if (group.isNotEmpty) batches.add(group);
+      } else {
+        final one = item.toString();
+        if (one.isNotEmpty) batches.add([one]);
+      }
+    }
+    final resRaw = m['resources'];
+    final resources = <String, String>{};
+    if (resRaw is Map) {
+      resRaw.forEach((k, v) {
+        final key = k.toString();
+        final path = v?.toString() ?? '';
+        if (key.isNotEmpty && path.isNotEmpty) resources[key] = path;
+      });
+    }
+    return SitePageScript(
+      id: m['id']?.toString() ?? '',
+      patterns: (m['matches'] as List? ?? const [])
+          .map((e) => e.toString())
+          .toList(),
+      batches: batches,
+      resources: resources,
+    );
+  }
 
   bool matches(String url) =>
       patterns.any((p) => SitePlugin._wildcard(p).hasMatch(url.trim()));

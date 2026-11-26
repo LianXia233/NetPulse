@@ -7,11 +7,14 @@ import 'package:webview_flutter/webview_flutter.dart';
 
 import '../bridge.dart';
 import '../download_sheet.dart';
+import '../link_batch_sheet.dart';
 import '../page_kit.dart';
 import '../plugin_runtime.dart';
 import '../store.dart';
+import '../userscript.dart';
 import '../theme.dart';
 import '../widgets.dart';
+import 'userscripts_page.dart';
 
 /// 内置浏览器：打开网页、嗅探直链，并把链接（含 Cookie / Referer / UA）推给下载器。
 class BrowserPage extends StatefulWidget {
@@ -63,12 +66,17 @@ class _BrowserPageState extends State<BrowserPage> {
       ..setNavigationDelegate(
         NavigationDelegate(
           onProgress: (p) => setState(() => _progress = p / 100),
-          onPageStarted: (url) => setState(() {
-            _loading = true;
-            _url = url;
-            _address.text = url;
-            _injectedScripts.clear();
-          }),
+          onPageStarted: (url) {
+            setState(() {
+              _loading = true;
+              _url = url;
+              _address.text = url;
+              _injectedScripts.clear();
+            });
+            // @run-at document-start 的脚本尽早进页面；失败会在
+            // onPageFinished 兜底补注入。
+            unawaited(_injectUserScripts(url, start: true));
+          },
           onPageFinished: (url) async {
             setState(() {
               _loading = false;
@@ -79,6 +87,7 @@ class _BrowserPageState extends State<BrowserPage> {
               await _installResourceHook();
               await _sniff();
             }
+            await _injectUserScripts(url, start: false);
             await _injectPageScripts(url);
             if (_store?.browserUaMode == 'desktop') {
               try {
@@ -134,6 +143,7 @@ class _BrowserPageState extends State<BrowserPage> {
       SitePlugin.all().then((_) {
         if (mounted) setState(() {});
       });
+      UserScriptStore.i.ensureLoaded();
     }
     if (_settingsApplied) return;
     _settingsApplied = true;
@@ -160,6 +170,13 @@ class _BrowserPageState extends State<BrowserPage> {
       default:
         return null;
     }
+  }
+
+  /// 桥接请求使用的 User-Agent：跟随浏览器标识设置，空值交给内核默认。
+  String _requestUa() {
+    final store = _store;
+    if (store == null) return '';
+    return _resolveUserAgent(store) ?? '';
   }
 
   Future<void> _applyBrowserSettings({bool reload = false}) async {
@@ -365,6 +382,48 @@ class _BrowserPageState extends State<BrowserPage> {
                         ),
                         label: const Text('清除缓存'),
                       ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 10),
+              PmCard(
+                padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+                radius: 14,
+                onTap: () {
+                  Navigator.pop(ctx);
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const UserScriptsPage(),
+                    ),
+                  );
+                },
+                child: Row(
+                  children: [
+                    const PmIconBadge(Icons.extension_rounded, size: 34, radius: 11),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('用户脚本', style: ctx.text.bodyMedium),
+                          Text(
+                            store.userScriptsEnabled
+                                ? '已启用 ${UserScriptStore.i.enabledCount} 个 · 支持 GreasyFork'
+                                : '已暂停全部用户脚本',
+                            style: ctx.text.bodySmall?.copyWith(
+                              color: pm.muted,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    Icon(
+                      Icons.chevron_right_rounded,
+                      size: 18,
+                      color: pm.muted,
                     ),
                   ],
                 ),
@@ -1147,9 +1206,7 @@ class _BrowserPageState extends State<BrowserPage> {
     }
     final headers = _pluginHeaders(result, chosen);
     final name =
-        chosen['fileName']?.toString() ??
-        result['fileName']?.toString() ??
-        null;
+        chosen['fileName']?.toString() ?? result['fileName']?.toString();
     final audioUrl =
         (chosen['audioUrl'] ?? result['audioUrl'])?.toString() ?? '';
     final extras = <Map<String, String>>[];
@@ -1169,6 +1226,121 @@ class _BrowserPageState extends State<BrowserPage> {
     );
   }
 
+  /// 内置站点增强脚本：随版本发布，不需要用户安装。
+  static const List<({String name, List<String> matches, String asset})>
+  _builtinSiteScripts = [
+    (
+      name: 'greasyfork',
+      matches: ['*://greasyfork.org/*', '*://*.greasyfork.org/*'],
+      asset: 'assets/userscript/greasyfork.js',
+    ),
+  ];
+
+  /// 注入用户脚本与站点增强脚本。
+  ///
+  /// `start` 区分 `@run-at document-start`：这类脚本要在页面脚本之前跑，
+  /// 但 WebView 在 onPageStarted 阶段文档可能还没建立，注入失败就留给
+  /// onPageFinished 兜底补一次（已成功的用 _injectedScripts 去重）。
+  Future<void> _injectUserScripts(String url, {required bool start}) async {
+    final store = _store;
+    if (store == null || !store.browserJavaScript) return;
+
+    if (!start) {
+      for (final item in _builtinSiteScripts) {
+        final hit = item.matches.any((p) => _wildcardHit(p, url));
+        if (!hit) continue;
+        final key = 'site:${item.name}';
+        if (_injectedScripts.contains(key)) continue;
+        try {
+          final js = await rootBundle.loadString(item.asset);
+          if (js.isEmpty) continue;
+          await _controller.runJavaScript(_userScriptWrapper(key, js));
+          _injectedScripts.add(key);
+        } catch (_) {}
+      }
+    }
+
+    if (!store.userScriptsEnabled) return;
+    await UserScriptStore.i.ensureLoaded();
+    final scripts = UserScriptStore.i.scripts
+        .where((s) => s.enabled && s.atDocumentStart == start)
+        .toList();
+    if (scripts.isEmpty) return;
+
+    var shim = '';
+    try {
+      shim = await rootBundle.loadString('assets/userscript/gm-shim.js');
+    } catch (_) {}
+
+    for (final script in scripts) {
+      if (!script.matches(url)) continue;
+      final key = 'us:${script.id}';
+      if (_injectedScripts.contains(key)) continue;
+      final payload = await UserScriptStore.i.payloadFor(script);
+      if (payload.body.isEmpty) continue;
+      try {
+        final meta = jsonEncode({
+          'id': script.id,
+          'name': script.name,
+          'namespace': script.namespace,
+          'version': script.version,
+          'description': script.description,
+          'author': script.author,
+          'homepage': script.homepage,
+          'match': script.match,
+          'grant': script.grant,
+          'runAt': script.runAt,
+        });
+        await _controller.runJavaScript(
+          'window.__npScript = $meta;'
+          'window.__npScriptValues = ${jsonEncode(payload.values)};'
+          'window.__npUserResources = ${jsonEncode(payload.resources)};',
+        );
+        if (shim.isNotEmpty) {
+          await _controller.runJavaScript(
+            _userScriptWrapper('shim:${script.id}', shim),
+          );
+        }
+        await _controller.runJavaScript(
+          _userScriptWrapper(
+            key,
+            '${payload.requires}\n;\n${payload.body}',
+          ),
+        );
+        _injectedScripts.add(key);
+      } catch (_) {
+        // 保留未标记状态，onPageFinished 会再补一次。
+      }
+    }
+  }
+
+  static bool _wildcardHit(String pattern, String url) {
+    final p = pattern.trim();
+    if (p.isEmpty) return false;
+    final re = RegExp(
+      '^${RegExp.escape(p).replaceAll(r'*', '.*')}\$',
+      caseSensitive: false,
+    );
+    return re.hasMatch(url.trim());
+  }
+
+  static String _userScriptWrapper(String key, String body) {
+    final safeKey = jsonEncode(key);
+    return """
+(function(){
+  if (!window.__npUsLoaded) window.__npUsLoaded = {};
+  if (window.__npUsLoaded[$safeKey]) return;
+  window.__npUsLoaded[$safeKey] = 1;
+$_netpulseBridgeJs
+  try {
+$body
+  } catch (e) {
+    try { console.error('[NetPulse] 用户脚本执行失败', e); } catch (err) {}
+  }
+})();
+""";
+  }
+
   Future<void> _injectPageScripts(String url) async {
     if ((_store?.browserJavaScript ?? true) != true) return;
     final plugins = await SitePlugin.all();
@@ -1180,26 +1352,48 @@ class _BrowserPageState extends State<BrowserPage> {
         final key = '${plugin.id}:${page.id}';
         if (_injectedScripts.contains(key)) continue;
         _injectedScripts.add(key);
-        final scripts = <String>[];
-        for (final path in page.js) {
+        if (page.resources.isNotEmpty) {
+          final res = <String, String>{};
+          for (final item in page.resources.entries) {
+            try {
+              res[item.key] = await rootBundle.loadString(
+                'assets/plugins/${plugin.id}/${item.value}',
+              );
+            } catch (_) {}
+          }
+          if (res.isNotEmpty) {
+            try {
+              await _controller.runJavaScript(
+                'window.__npResources = ${jsonEncode(res)};',
+              );
+            } catch (_) {}
+          }
+        }
+        for (var bi = 0; bi < page.batches.length; bi++) {
+          final scripts = <String>[];
+          for (final path in page.batches[bi]) {
+            try {
+              scripts.add(
+                await rootBundle.loadString('assets/plugins/${plugin.id}/$path'),
+              );
+            } catch (_) {}
+          }
+          if (scripts.isEmpty) continue;
           try {
-            scripts.add(
-              await rootBundle.loadString('assets/plugins/${plugin.id}/$path'),
+            await _controller.runJavaScript(
+              _pageScriptWrapper('$key#$bi', scripts.join('\n;\n')),
             );
           } catch (_) {}
         }
-        if (scripts.isEmpty) continue;
-        final safeKey = jsonEncode(key);
-        final body = scripts.join('\n;\n');
-        final wrapped =
-            """
-(function(){
-  if (!window.__npInjected) window.__npInjected = {};
-  if (window.__npInjected[$safeKey]) return;
-  window.__npInjected[$safeKey] = 1;
+      }
+    }
+  }
+
+  /// 页面侧 `window.netpulse` 桥：插件脚本与用户脚本共用一份。
+  static const String _netpulseBridgeJs = '''
   if (!window.netpulse) {
-    window.__npPagePending = {};
-    window.__npPageReply = function(id, ok, payload) {
+    window.__npPagePending = window.__npPagePending || {};
+    window.__npPageReply = window.__npPageReply || function(id, ok, payload) {
       var p = window.__npPagePending[id];
       if (!p) return;
       delete window.__npPagePending[id];
@@ -1217,19 +1411,28 @@ class _BrowserPageState extends State<BrowserPage> {
     }
     window.netpulse = {
       download: function(opts) { return npPageCall('download', opts || {}); },
+      direct: function(opts) { return npPageCall('direct', opts || {}); },
       invoke: function(name, args) { return npPageCall('invoke', { name: name, args: args || {} }); }
     };
   }
+''';
+
+  /// 页面脚本执行壳：提供 `window.netpulse` 桥，并按 key 做一次性保护。
+  static String _pageScriptWrapper(String key, String body) {
+    final safeKey = jsonEncode(key);
+    return """
+(function(){
+  if (!window.__npInjected) window.__npInjected = {};
+  if (window.__npInjected[$safeKey]) return;
+  window.__npInjected[$safeKey] = 1;
+$_netpulseBridgeJs
   try {
 $body
-  } catch (e) {}
+  } catch (e) {
+    try { console.error('[NetPulse] 页面脚本执行失败', e); } catch (err) {}
+  }
 })();
 """;
-        try {
-          await _controller.runJavaScript(wrapped);
-        } catch (_) {}
-      }
-    }
   }
 
   Future<void> _onPageBridge(JavaScriptMessage message) async {
@@ -1264,10 +1467,132 @@ $body
       // 先结束页面按钮的等待，解析结果在 App 内的下载参数页确认。
       _replyPage(id, true, {'ok': true});
       if (mounted) unawaited(_runPlugin(target, link, quietIfNull: true));
+    } else if (op == 'direct') {
+      // 页面脚本已经把直链和请求头都准备好了（网盘分享页解析结果），
+      // 直接进入下载参数页，不再走插件解析。
+      final items = <Map<String, dynamic>>[];
+      final raw = data['items'];
+      if (raw is List) {
+        for (final e in raw) {
+          if (e is! Map) continue;
+          final url = e['url']?.toString() ?? '';
+          if (url.isEmpty) continue;
+          if (!url.startsWith('http://') && !url.startsWith('https://')) {
+            continue;
+          }
+          items.add({
+            'url': url,
+            'name': e['name']?.toString() ?? '',
+            'size': (e['size'] as num?)?.toInt() ?? 0,
+          });
+        }
+      }
+      final headers = <String, String>{};
+      final rawHeaders = data['headers'];
+      if (rawHeaders is Map) {
+        rawHeaders.forEach((k, v) {
+          final key = k.toString().trim();
+          if (key.isEmpty) return;
+          headers[key] = v?.toString() ?? '';
+        });
+      }
+      _replyPage(id, true, {'ok': true, 'count': items.length});
+      if (items.isEmpty || !mounted) return;
+      if (items.length == 1) {
+        await showDownloadSheet(
+          context,
+          initialUrl: items.first['url']!,
+          extraHeaders: headers,
+          suggestedName: (items.first['name'] as String).isEmpty
+              ? null
+              : items.first['name'] as String,
+        );
+      } else {
+        final n = await showLinkBatchSheet(
+          context,
+          items: items,
+          headers: headers,
+          referrer: data['referrer']?.toString() ?? '',
+          source: _title.isEmpty ? '' : _title,
+        );
+        if (mounted && n > 0) {
+          pmToast(context, '已加入 $n 个下载任务');
+        }
+      }
     } else if (op == 'invoke') {
-      // 页面脚本的 RPC（如 123 云盘同步登录态）没有宿主实现；
-      // 解析器本身会用浏览器 Cookie，返回未登录即可继续。
-      _replyPage(id, true, {'ok': true, 'loggedIn': false});
+      final name = data['name']?.toString() ?? '';
+      final args = data['args'] is Map
+          ? (data['args'] as Map).cast<String, dynamic>()
+          : <String, dynamic>{};
+      if (name == 'installScript') {
+        final pageUrl = args['pageUrl']?.toString() ?? '';
+        final url = args['url']?.toString() ?? '';
+        final store = UserScriptStore.i;
+        await store.ensureLoaded();
+        final existed =
+            store.scripts.any((s) => pageUrl.isNotEmpty && s.sourceUrl == pageUrl);
+        final r = pageUrl.isNotEmpty
+            ? await store.installFromPage(pageUrl)
+            : await store.installFromUrl(url);
+        if (r.script == null) {
+          _replyPage(id, false, r.error);
+        } else {
+          _replyPage(id, true, {
+            'ok': true,
+            'name': r.script!.name,
+            'version': r.script!.version,
+            'existed': existed,
+          });
+        }
+      } else if (name == 'openUserScripts') {
+        _replyPage(id, true, {'ok': true});
+        if (mounted) {
+          await Navigator.push(
+            context,
+            MaterialPageRoute(builder: (_) => const UserScriptsPage()),
+          );
+        }
+      } else {
+        // 页面脚本的其它 RPC（如 123 云盘同步登录态）没有宿主实现；
+        // 解析器本身会用浏览器 Cookie，返回未登录即可继续。
+        _replyPage(id, true, {'ok': true, 'loggedIn': false});
+      }
+    } else if (op == 'fetch') {
+      final url = data['url']?.toString() ?? '';
+      if (url.isEmpty) {
+        _replyPage(id, false, '缺少 url');
+        return;
+      }
+      final r = await Core.callAsync('web_fetch', {
+        'url': url,
+        'method': data['method']?.toString() ?? 'GET',
+        'headers': data['headers'] is Map ? data['headers'] : const {},
+        'body': data['body']?.toString() ?? '',
+        'timeoutMs': (data['timeoutMs'] as num?)?.toInt() ?? 30000,
+        'maxBytes': (data['maxBytes'] as num?)?.toInt() ?? 16 * 1024 * 1024,
+        'userAgent': _requestUa(),
+      });
+      if (r['ok'] != true) {
+        _replyPage(id, false, r['error']?.toString() ?? '请求失败');
+      } else {
+        _replyPage(id, true, r['data']);
+      }
+    } else if (op == 'gm') {
+      final action = data['action']?.toString() ?? '';
+      final scriptId = data['id']?.toString() ?? '';
+      final name = data['name']?.toString() ?? '';
+      if (scriptId.isEmpty || name.isEmpty) {
+        _replyPage(id, false, '参数不完整');
+        return;
+      }
+      final store = UserScriptStore.i;
+      await store.ensureLoaded();
+      if (action == 'set') {
+        await store.kvSet(scriptId, name, data['value']);
+      } else if (action == 'delete') {
+        await store.kvDelete(scriptId, name);
+      }
+      _replyPage(id, true, {'ok': true});
     } else {
       _replyPage(id, false, '不支持的操作: $op');
     }
